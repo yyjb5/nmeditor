@@ -1,0 +1,13 @@
+.find-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-direction: row;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  background: #f6f7f9;
+  border: 1px solid #d9dde3;
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: nowrap;
+}

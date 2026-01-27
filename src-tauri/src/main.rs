@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    deskcsv_lib::run()
+    nmeditor_lib::run()
 }

@@ -1,0 +1,133 @@
+.macro-panel {
+  background: #f7f9ff;
+  border: 1px solid #e3e8f3;
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ops-panel {
+  background: #f6f7f9;
+  border: 1px solid #d9dde3;
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.find-panel {
+  background: #f8f9fb;
+  border: 1px solid #d9dde3;
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.stats-panel {
+  background: #f8f9fb;
+  border: 1px solid #d9dde3;
+  border-radius: 12px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rules-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rule-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.rule-item button {
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid #cbd5e1;
+  background: #f9fafb;
+}
+
+.stats-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.stats-subtitle {
+  font-size: 12px;
+  color: #6b7280;
+  font-weight: 600;
+}
+
+.stats-table {
+  display: grid;
+  gap: 4px;
+}
+
+.stats-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr 1fr;
+  gap: 8px;
+  padding: 6px 8px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #1f2937;
+}
+
+.stats-row.stats-header {
+  background: #eef2f7;
+  font-weight: 600;
+}
+
+.stats-empty {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.macro-title {
+  font-weight: 700;
+  color: #1f2a44;
+}
+
+.macro-output {
+  font-size: 12px;
+  color: #0f172a;
+  background: #eef2f7;
+  border: 1px solid #d6dbe5;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+
+.macro-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+}
+
+.macro-panel input {
+  border: 1px solid #d0d8e8;
+  background: #ffffff;
+  color: #0f172a;
+  border-radius: 10px;
+  padding: 8px 12px;
+}

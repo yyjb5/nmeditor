@@ -1,0 +1,27 @@
+.surface-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.file-meta {
+  background: #f6f7f9;
+  border-radius: 6px;
+  padding: 6px 10px;
+  border: 1px solid #e5e7eb;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.label {
+  font-size: 12px;
+  color: #5c6475;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.value {
+  font-weight: 600;
+  color: #111827;
+}

@@ -1,76 +1,25 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { message, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import FindBar from "./components/FindBar";
+import GridView from "./components/GridView";
+import Panels from "./components/Panels";
+import Quickbar from "./components/Quickbar";
+import StatusBar from "./components/StatusBar";
+import SurfaceHeader from "./components/SurfaceHeader";
+import useRowColumnOps from "./hooks/useRowColumnOps";
+import useCsvSession from "./hooks/useCsvSession";
+import useFileOps from "./hooks/useFileOps";
+import useSelection from "./hooks/useSelection";
+import useTextSession from "./hooks/useTextSession";
 import "./App.css";
-
-type CsvPreview = {
-  headers: string[];
-  rows: string[][];
-  delimiter: string;
-  path: string;
-};
-
-type CsvSessionInfo = {
-  session_id: number;
-  headers: string[];
-  delimiter: string;
-  path: string;
-};
-
-type CsvSlice = {
-  rows: string[][];
-  start: number;
-  end: number;
-  eof: boolean;
-};
 
 type PatchOp = {
   key: string;
   prev: string | null;
   next: string | null;
-};
-
-type CsvPatch = {
-  row: number;
-  col: number;
-  value: string;
-};
-
-type MacroOp = "replace" | "uppercase" | "lowercase" | "trim" | "prefix" | "suffix";
-
-type CsvMacroSpec = {
-  op: MacroOp;
-  column: number;
-  find?: string;
-  replace?: string;
-  text?: string;
-};
-
-type CsvMacroResult = {
-  output_path: string;
-  applied: number;
-};
-
-type ColumnStat = {
-  name: string;
-  non_empty: number;
-  distinct: number;
-  distinct_truncated: boolean;
-  inferred: string;
-};
-
-type FindReplaceSpec = {
-  find: string;
-  replace: string;
-  column?: number;
-  regex: boolean;
-  match_case: boolean;
-};
-
-type FindReplaceResult = {
-  output_path: string;
-  applied: number;
 };
 
 const delimiterPresets = [
@@ -81,349 +30,148 @@ const delimiterPresets = [
 ];
 
 function App() {
-  const [preview, setPreview] = useState<CsvPreview | null>(null);
-  const [delimiter, setDelimiter] = useState(",");
-  const [loading, setLoading] = useState(false);
-  const [loadingRows, setLoadingRows] = useState(false);
-  const [sessionId, setSessionId] = useState<number | null>(null);
-  const [rows, setRows] = useState<string[][]>([]);
-  const [headers, setHeaders] = useState<string[]>([]);
-  const [eof, setEof] = useState(false);
-  const [activePath, setActivePath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [delimiterApplied, setDelimiterApplied] = useState<string | null>(null);
+  const [fileMode, setFileMode] = useState<"none" | "csv" | "text">("none");
+  const openDialogActiveRef = useRef(false);
+  const [totalRows, setTotalRows] = useState<number | null>(null);
+  const [windowStart, setWindowStart] = useState(0);
+  const [windowLoading, setWindowLoading] = useState(false);
+  const [windowSize, setWindowSize] = useState(400);
   const [patches, setPatches] = useState<Record<string, string>>({});
   const [undoStack, setUndoStack] = useState<PatchOp[]>([]);
   const [redoStack, setRedoStack] = useState<PatchOp[]>([]);
-  const [macroOp, setMacroOp] = useState<MacroOp>("replace");
-  const [macroColumn, setMacroColumn] = useState("0");
-  const [macroFind, setMacroFind] = useState("");
-  const [macroReplace, setMacroReplace] = useState("");
-  const [macroText, setMacroText] = useState("");
-  const [macroAppliedCount, setMacroAppliedCount] = useState(0);
-  const [macroOutputPath, setMacroOutputPath] = useState<string | null>(null);
   const [columnIndexInput, setColumnIndexInput] = useState("0");
   const [columnNameInput, setColumnNameInput] = useState("");
+  const [rowIndexInput, setRowIndexInput] = useState("0");
   const [sortColumnInput, setSortColumnInput] = useState("");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [filterColumnInput, setFilterColumnInput] = useState("");
   const [filterText, setFilterText] = useState("");
-  const [sortRules, setSortRules] = useState<Array<{ column: string; direction: "asc" | "desc" }>>(
-    [],
-  );
+  const [sortRules, setSortRules] = useState<
+    Array<{ column: string; direction: "asc" | "desc" }>
+  >([]);
   const [filterRules, setFilterRules] = useState<Array<{ column: string; value: string }>>(
     [],
   );
-  const [findText, setFindText] = useState("");
-  const [replaceText, setReplaceText] = useState("");
-  const [useRegex, setUseRegex] = useState(false);
-  const [matchCase, setMatchCase] = useState(false);
-  const [findColumnInput, setFindColumnInput] = useState("");
-  const [findStartRow, setFindStartRow] = useState("");
-  const [findEndRow, setFindEndRow] = useState("");
-  const [findAppliedCount, setFindAppliedCount] = useState(0);
-  const [findOutputPath, setFindOutputPath] = useState<string | null>(null);
-  const [eolMode, setEolMode] = useState<"CRLF" | "LF">("CRLF");
-  const [includeBom, setIncludeBom] = useState(false);
-  const [encodingMode, setEncodingMode] = useState<"UTF-8" | "UTF-16LE">("UTF-8");
-  const [dialectDelimiter, setDialectDelimiter] = useState(",");
-  const [dialectQuote, setDialectQuote] = useState("\"");
-  const [dialectEscape, setDialectEscape] = useState("\"");
-  const [fullStats, setFullStats] = useState<ColumnStat[] | null>(null);
-  const [fullStatsLoading, setFullStatsLoading] = useState(false);
+  const [showQuickbar, setShowQuickbar] = useState(true);
+  const [showFindBar, setShowFindBar] = useState(true);
+  const [showMacroPanel, setShowMacroPanel] = useState(false);
+  const [showOpsPanel, setShowOpsPanel] = useState(false);
+  const [showExportPanel, setShowExportPanel] = useState(false);
+  const [showFindPanel, setShowFindPanel] = useState(false);
+  const [showStatsPanel, setShowStatsPanel] = useState(false);
+  const [locale, setLocale] = useState<"en" | "zh">(() => {
+    const stored = window.localStorage.getItem("nmeditor.locale");
+    if (stored === "en" || stored === "zh") return stored;
+    return navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
+  });
   const [editingCell, setEditingCell] = useState<{
     row: number;
     col: number;
     value: string;
   } | null>(null);
-  const columnTemplate = useMemo(
-    () => `repeat(${Math.max(headers.length, 3)}, minmax(120px, 1fr))`,
-    [headers.length],
+
+  const t = useCallback(
+    (en: string, zh: string) => (locale === "zh" ? zh : en),
+    [locale],
   );
 
-  const parentRef = useRef<HTMLDivElement | null>(null);
-  const getCellKey = (row: number, col: number) => `${row}:${col}`;
-  const getCellValue = (row: number, col: number) => {
-    const key = getCellKey(row, col);
-    if (patches[key] !== undefined) {
-      return patches[key];
-    }
-    return rows[row]?.[col] ?? "";
-  };
+  const {
+    preview,
+    delimiter,
+    loading,
+    rows,
+    headers,
+    eof,
+    activePath,
+    delimiterApplied,
+    setDelimiter,
+    setLoading,
+    setRows,
+    setHeaders,
+    setEof,
+    openCsvPath,
+    closeSession,
+    applyDelimiter,
+  } = useCsvSession({ setError });
 
-  const visibleRowIndices = useMemo(() => {
-    const indices = rows.map((_, index) => index);
+  const {
+    textPath,
+    textContent,
+    textDirty,
+    textLoading,
+    setTextContent,
+    openText,
+    saveTextTo,
+    resetTextSession,
+  } = useTextSession({ setError });
 
-    const filters = filterRules
-      .map((rule) => ({
-        column: Number.parseInt(rule.column, 10),
-        value: rule.value.toLowerCase(),
-      }))
-      .filter((rule) => !Number.isNaN(rule.column) && rule.value);
+  const MEMORY_BUDGET_BYTES = 2 * 1024 * 1024 * 1024;
 
-    const filtered = filters.length
-      ? indices.filter((rowIndex) =>
-          filters.every((rule) =>
-            getCellValue(rowIndex, rule.column).toLowerCase().includes(rule.value),
-          ),
-        )
-      : indices;
+  const dataColumnCount = useMemo(() => {
+    const rowMax = rows.reduce((max, row) => Math.max(max, row.length), 0);
+    return Math.max(headers.length, rowMax);
+  }, [headers.length, rows]);
 
-    const sorts = sortRules
-      .map((rule) => ({
-        column: Number.parseInt(rule.column, 10),
-        direction: rule.direction,
-      }))
-      .filter((rule) => !Number.isNaN(rule.column));
+  const selectionColumnCount = Math.max(dataColumnCount, 3);
 
-    if (!sorts.length) {
-      return filtered;
-    }
+  const {
+    selectionMode,
+    isDraggingSelection,
+    setIsDraggingSelection,
+    updateSelection,
+    clearSelection,
+    getActiveRange,
+    isCellInSelection,
+    isRowInSelection,
+    isColInSelection,
+  } = useSelection(rows.length, selectionColumnCount);
 
-    return [...filtered].sort((a, b) => {
-      for (const rule of sorts) {
-        const left = getCellValue(a, rule.column);
-        const right = getCellValue(b, rule.column);
-        const result = left.localeCompare(right, undefined, { numeric: true });
-        if (result !== 0) {
-          return rule.direction === "asc" ? result : -result;
-        }
+  const getCellValue = useCallback(
+    (row: number, col: number) => {
+      const key = `${row}:${col}`;
+      if (Object.prototype.hasOwnProperty.call(patches, key)) {
+        return patches[key];
       }
-      return 0;
-    });
-  }, [rows, patches, sortRules, filterRules]);
+      const localRow = row - windowStart;
+      if (localRow < 0 || localRow >= rows.length) return "";
+      return rows[localRow]?.[col] ?? "";
+    },
+    [patches, rows, windowStart],
+  );
 
-  const columnStats = useMemo(() => {
-    if (!headers.length || !rows.length) return [];
-    return headers.map((header, colIdx) => {
-      let nonEmpty = 0;
-      const distinct = new Set<string>();
-      let numberCount = 0;
-      let dateCount = 0;
-      rows.forEach((_, rowIdx) => {
-        const value = getCellValue(rowIdx, colIdx).trim();
-        if (!value) return;
-        nonEmpty += 1;
-        distinct.add(value);
-        if (!Number.isNaN(Number(value))) {
-          numberCount += 1;
-        } else if (!Number.isNaN(Date.parse(value))) {
-          dateCount += 1;
-        }
-      });
-
-      let inferred = "text";
-      if (nonEmpty > 0 && numberCount === nonEmpty) {
-        inferred = "number";
-      } else if (nonEmpty > 0 && dateCount === nonEmpty) {
-        inferred = "date";
-      }
-
-      return {
-        name: header || `Column ${colIdx + 1}`,
-        nonEmpty,
-        distinct: distinct.size,
-        inferred,
-      };
-    });
-  }, [headers, rows, patches]);
-
-  const runFullStats = async () => {
-    if (!preview) return;
-    setError(null);
-    setFullStatsLoading(true);
-    try {
-      const result = await invoke<ColumnStat[]>("compute_column_stats", {
-        path: preview.path,
-        delimiter: preview.delimiter,
-        maxDistinct: 5000,
-      });
-      setFullStats(result);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setFullStatsLoading(false);
-    }
-  };
-
-  const rowVirtualizer = useVirtualizer({
-    count: visibleRowIndices.length || 1,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 36,
-    overscan: 8,
-  });
-
-  const virtualItems = rowVirtualizer.getVirtualItems();
-
-  useEffect(() => {
-    if (sessionId && rows.length === 0 && !loadingRows && !eof) {
-      void loadMore();
-    }
-  }, [sessionId, rows.length, loadingRows, eof]);
-
-  useEffect(() => {
-    if (!virtualItems.length || eof) return;
-    const last = virtualItems[virtualItems.length - 1];
-    if (last.index >= visibleRowIndices.length - 8) {
-      void loadMore();
-    }
-  }, [virtualItems, visibleRowIndices.length, eof]);
-
-  const handleOpen = async () => {
-    setError(null);
-    const selected = await openDialog({
-      multiple: false,
-      filters: [{ name: "CSV", extensions: ["csv", "txt"] }],
-    });
-
-    if (!selected || Array.isArray(selected)) return;
-
-    setLoading(true);
-    try {
-      if (sessionId) {
-        await invoke("close_csv_session", { sessionId });
-      }
-
-      const info = await invoke<CsvSessionInfo>("open_csv_session", {
-        path: selected,
-        delimiter,
-      });
-      setSessionId(info.session_id);
-      setHeaders(info.headers);
-      setRows([]);
-      setEof(false);
-      setActivePath(info.path);
-      setDelimiterApplied(info.delimiter);
-      setPatches({});
-      setUndoStack([]);
-      setRedoStack([]);
-      setEditingCell(null);
-      setMacroAppliedCount(0);
-      setMacroOutputPath(null);
-      setPreview({
-        headers: info.headers,
-        rows: [],
-        delimiter: info.delimiter,
-        path: info.path,
-      });
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadMore = async () => {
-    if (!sessionId || loadingRows || eof) return;
-    setLoadingRows(true);
-    try {
-      const slice = await invoke<CsvSlice>("read_csv_rows", {
-        sessionId,
-        limit: 200,
-      });
-      if (slice.rows.length) {
-        setRows((prev) => [...prev, ...slice.rows]);
-      }
-      setEof(slice.eof);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setLoadingRows(false);
-    }
-  };
-
-  const applyDelimiter = async () => {
-    if (!activePath || loading) return;
-    setError(null);
-    setLoading(true);
-    try {
-      if (sessionId) {
-        await invoke("close_csv_session", { sessionId });
-      }
-
-      const info = await invoke<CsvSessionInfo>("open_csv_session", {
-        path: activePath,
-        delimiter,
-      });
-      setSessionId(info.session_id);
-      setHeaders(info.headers);
-      setRows([]);
-      setEof(false);
-      setDelimiterApplied(info.delimiter);
-      setPatches({});
-      setUndoStack([]);
-      setRedoStack([]);
-      setEditingCell(null);
-      setMacroAppliedCount(0);
-      setMacroOutputPath(null);
-      setPreview({
-        headers: info.headers,
-        rows: [],
-        delimiter: info.delimiter,
-        path: info.path,
-      });
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const saveAs = async () => {
-    if (!preview) return;
-    const target = await saveDialog({
-      defaultPath: preview.path.replace(/\.(csv|txt)$/i, "_edited.csv"),
-      filters: [{ name: "CSV", extensions: ["csv"] }],
-    });
-
-    if (!target || Array.isArray(target)) return;
-
-    setError(null);
-    setLoading(true);
-    try {
-      const patchList: CsvPatch[] = Object.entries(patches).map(([key, value]) => {
-        const [row, col] = key.split(":").map(Number);
-        return { row, col, value };
-      });
-
-      await invoke("save_csv_with_patches", {
-        path: preview.path,
-        targetPath: target,
-        delimiter: dialectDelimiter || preview.delimiter,
-        patches: patchList,
-        eol: eolMode,
-        bom: includeBom,
-        encoding: encodingMode,
-        quote: dialectQuote,
-        escape: dialectEscape,
-      });
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const applyPatch = (row: number, col: number, value: string) => {
-    const key = getCellKey(row, col);
-    const original = rows[row]?.[col] ?? "";
-    const prev = patches[key] ?? null;
-    const next = value === original ? null : value;
-
-    if (prev === next) return;
-
+  const applyPatchValue = useCallback((key: string, value: string | null) => {
     setPatches((current) => {
       const updated = { ...current };
-      if (next === null) {
+      if (value === null) {
         delete updated[key];
       } else {
-        updated[key] = next;
+        updated[key] = value;
       }
       return updated;
     });
-    setUndoStack((stack) => [...stack, { key, prev, next }]);
-    setRedoStack([]);
-  };
+  }, []);
+
+  const applyPatch = useCallback(
+    (row: number, col: number, value: string) => {
+      const localRow = row - windowStart;
+      if (localRow < 0 || localRow >= rows.length) return;
+      const key = `${row}:${col}`;
+      const baseValue = rows[localRow]?.[col] ?? "";
+      const hasPatch = Object.prototype.hasOwnProperty.call(patches, key);
+      const currentValue = hasPatch ? patches[key] : baseValue;
+      if (value === currentValue) return;
+
+      const nextValue = value === baseValue ? null : value;
+      applyPatchValue(key, nextValue);
+      setUndoStack((current) => [
+        ...current,
+        { key, prev: hasPatch ? patches[key] : baseValue, next: nextValue },
+      ]);
+      setRedoStack([]);
+    },
+    [applyPatchValue, patches, rows, windowStart],
+  );
 
   const startEditing = (row: number, col: number) => {
     setEditingCell({ row, col, value: getCellValue(row, col) });
@@ -440,120 +188,152 @@ function App() {
   };
 
   const undo = () => {
-    const last = undoStack[undoStack.length - 1];
-    if (!last) return;
-    setUndoStack((stack) => stack.slice(0, -1));
-    setRedoStack((stack) => [...stack, last]);
-    setPatches((current) => {
-      const updated = { ...current };
-      if (last.prev === null) {
-        delete updated[last.key];
-      } else {
-        updated[last.key] = last.prev;
-      }
-      return updated;
+    setUndoStack((current) => {
+      if (!current.length) return current;
+      const last = current[current.length - 1];
+      applyPatchValue(last.key, last.prev);
+      setRedoStack((redo) => [...redo, last]);
+      return current.slice(0, -1);
     });
   };
 
   const redo = () => {
-    const last = redoStack[redoStack.length - 1];
-    if (!last) return;
-    setRedoStack((stack) => stack.slice(0, -1));
-    setUndoStack((stack) => [...stack, last]);
-    setPatches((current) => {
-      const updated = { ...current };
-      if (last.next === null) {
-        delete updated[last.key];
-      } else {
-        updated[last.key] = last.next;
-      }
-      return updated;
+    setRedoStack((current) => {
+      if (!current.length) return current;
+      const last = current[current.length - 1];
+      applyPatchValue(last.key, last.next);
+      setUndoStack((undoStackCurrent) => [...undoStackCurrent, last]);
+      return current.slice(0, -1);
     });
   };
 
-  const clearEdits = () => {
-    setPatches({});
+  const resetTransientEdits = () => {
     setUndoStack([]);
     setRedoStack([]);
     setEditingCell(null);
-    setMacroAppliedCount(0);
   };
 
-  const parseColumnIndex = (value: string, allowEnd: boolean) => {
-    if (value.trim() === "") return null;
-    const parsed = Number.parseInt(value, 10);
-    if (Number.isNaN(parsed) || parsed < 0) return null;
-    if (allowEnd && parsed > headers.length) return null;
-    if (!allowEnd && parsed >= headers.length) return null;
-    return parsed;
-  };
+  const getColumnCount = useCallback(() => dataColumnCount, [dataColumnCount]);
 
-  const insertColumn = () => {
-    const index = parseColumnIndex(columnIndexInput, true);
-    if (index === null) {
-      setError("Column index is invalid for insert.");
-      return;
-    }
-    const name = columnNameInput.trim() || `Column ${headers.length + 1}`;
-    setError(null);
-    setHeaders((current) => {
-      const next = [...current];
-      next.splice(index, 0, name);
-      return next;
-    });
-    setRows((current) =>
-      current.map((row) => {
-        const next = [...row];
-        next.splice(index, 0, "");
-        return next;
-      }),
-    );
-    clearEdits();
-  };
+  const getCurrentDelimiter = useCallback(
+    () => delimiterApplied ?? delimiter,
+    [delimiterApplied, delimiter],
+  );
 
-  const deleteColumn = () => {
-    const index = parseColumnIndex(columnIndexInput, false);
-    if (index === null) {
-      setError("Column index is invalid for delete.");
-      return;
-    }
-    setError(null);
-    setHeaders((current) => current.filter((_, idx) => idx !== index));
-    setRows((current) => current.map((row) => row.filter((_, idx) => idx !== index)));
-    clearEdits();
-  };
+  const {
+    rowOps,
+    columnOps,
+    resetOps,
+    insertRow,
+    deleteRow,
+    insertColumn,
+    deleteColumn,
+    renameColumn,
+    copySelection,
+    pasteSelection,
+  } = useRowColumnOps({
+    headers,
+    rows,
+    rowIndexInput,
+    columnIndexInput,
+    columnNameInput,
+    getColumnCount,
+    getCellValue,
+    applyPatch,
+    getCurrentDelimiter,
+    getActiveRange,
+    clearSelection,
+    setHeaders,
+    setRows,
+    setPatches,
+    setError,
+    resetTransientEdits,
+    t,
+  });
 
-  const renameColumn = () => {
-    const index = parseColumnIndex(columnIndexInput, false);
-    if (index === null) {
-      setError("Column index is invalid for rename.");
-      return;
-    }
-    const name = columnNameInput.trim();
-    if (!name) {
-      setError("Column name is required for rename.");
-      return;
-    }
-    setError(null);
-    setHeaders((current) => current.map((value, idx) => (idx === index ? name : value)));
-  };
-
-  const clearSortFilter = () => {
-    setSortColumnInput("");
-    setFilterColumnInput("");
-    setFilterText("");
-    setSortRules([]);
-    setFilterRules([]);
-  };
+  const {
+    macroOp,
+    macroColumn,
+    macroFind,
+    macroReplace,
+    macroText,
+    macroAppliedCount,
+    macroOutputPath,
+    setMacroOp,
+    setMacroColumn,
+    setMacroFind,
+    setMacroReplace,
+    setMacroText,
+    findText,
+    replaceText,
+    useRegex,
+    matchCase,
+    findColumnInput,
+    findStartRow,
+    findEndRow,
+    findAppliedCount,
+    findOutputPath,
+    setFindText,
+    setReplaceText,
+    setUseRegex,
+    setMatchCase,
+    setFindColumnInput,
+    setFindStartRow,
+    setFindEndRow,
+    eolMode,
+    includeBom,
+    encodingMode,
+    dialectDelimiter,
+    dialectQuote,
+    dialectEscape,
+    setEolMode,
+    setIncludeBom,
+    setEncodingMode,
+    setDialectDelimiter,
+    setDialectQuote,
+    setDialectEscape,
+    fullStats,
+    fullStatsLoading,
+    resetFileOps,
+    runFullStats,
+    runMacro,
+    runMacroOnFile,
+    applyFindReplace,
+    runFindReplaceOnFile,
+    saveAs,
+  } = useFileOps({
+    preview,
+    headers,
+    rows,
+    patches,
+    rowOps,
+    columnOps,
+    getCellValue,
+    applyPatch,
+    setError,
+    setLoading,
+    t,
+  });
 
   const addSortRule = () => {
-    if (!sortColumnInput) return;
-    setSortRules((current) => [...current, { column: sortColumnInput, direction: sortDirection }]);
+    const column = sortColumnInput.trim();
+    if (!column) return;
+    setSortRules((current) => [...current, { column, direction: sortDirection }]);
+    setSortColumnInput("");
   };
 
   const addFilterRule = () => {
-    if (!filterColumnInput || !filterText) return;
-    setFilterRules((current) => [...current, { column: filterColumnInput, value: filterText }]);
+    const column = filterColumnInput.trim();
+    const value = filterText.trim();
+    if (!column || !value) return;
+    setFilterRules((current) => [...current, { column, value }]);
+    setFilterColumnInput("");
+    setFilterText("");
+  };
+
+  const clearSortFilter = () => {
+    setSortRules([]);
+    setFilterRules([]);
   };
 
   const removeSortRule = (index: number) => {
@@ -564,722 +344,708 @@ function App() {
     setFilterRules((current) => current.filter((_, idx) => idx !== index));
   };
 
-  const runMacro = () => {
-    const columnIndex = Number.parseInt(macroColumn, 10);
-    if (Number.isNaN(columnIndex) || columnIndex < 0) {
-      setError("Macro column must be a non-negative number.");
-      return;
-    }
-    if (!rows.length) {
-      setError("No rows loaded. Load rows before running a macro.");
-      return;
-    }
-    if (macroOp === "replace" && !macroFind) {
-      setError("Find value is required for replace.");
-      return;
-    }
+  const visibleRowIndices = useMemo(() => {
+    const indices = rows.map((_, idx) => windowStart + idx);
+    const filtered = indices.filter((rowIndex) =>
+      filterRules.every((rule) => {
+        const colIndex = Number.parseInt(rule.column, 10);
+        if (Number.isNaN(colIndex)) return true;
+        return getCellValue(rowIndex, colIndex).includes(rule.value);
+      }),
+    );
 
-    setError(null);
-    let applied = 0;
+    if (!sortRules.length) return filtered;
 
-    rows.forEach((_, rowIdx) => {
-      const current = getCellValue(rowIdx, columnIndex);
-      let next = current;
-      switch (macroOp) {
-        case "replace":
-          next = current.split(macroFind).join(macroReplace);
-          break;
-        case "uppercase":
-          next = current.toUpperCase();
-          break;
-        case "lowercase":
-          next = current.toLowerCase();
-          break;
-        case "trim":
-          next = current.trim();
-          break;
-        case "prefix":
-          next = `${macroText}${current}`;
-          break;
-        case "suffix":
-          next = `${current}${macroText}`;
-          break;
-        default:
-          break;
+    const sorted = [...filtered];
+    sorted.sort((a, b) => {
+      for (const rule of sortRules) {
+        const colIndex = Number.parseInt(rule.column, 10);
+        if (Number.isNaN(colIndex)) continue;
+        const aValue = getCellValue(a, colIndex);
+        const bValue = getCellValue(b, colIndex);
+        const order = aValue.localeCompare(bValue, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+        if (order !== 0) {
+          return rule.direction === "asc" ? order : -order;
+        }
       }
-
-      if (next !== current) {
-        applyPatch(rowIdx, columnIndex, next);
-        applied += 1;
-      }
+      return 0;
     });
 
-    setMacroAppliedCount(applied);
-  };
+    return sorted;
+  }, [rows, filterRules, sortRules, getCellValue, windowStart]);
 
-  const parseOptionalIndex = (value: string) => {
-    if (value.trim() === "") return null;
-    const parsed = Number.parseInt(value, 10);
-    if (Number.isNaN(parsed) || parsed < 0) return null;
-    return parsed;
-  };
+  const hasSortFilter = sortRules.length > 0 || filterRules.length > 0;
 
-  const applyFindReplace = () => {
-    if (!findText) {
-      setError("Find text is required.");
-      return;
-    }
+  const totalRowCount = hasSortFilter
+    ? visibleRowIndices.length
+    : totalRows ?? rows.length;
 
-    const columnIndex = parseOptionalIndex(findColumnInput);
-    const startRow = parseOptionalIndex(findStartRow) ?? 0;
-    const endRow = parseOptionalIndex(findEndRow);
-    const lastRow = endRow ?? rows.length - 1;
+  const getRowIndex = useCallback(
+    (virtualIndex: number) => {
+      if (hasSortFilter) {
+        return visibleRowIndices[virtualIndex] ?? null;
+      }
+      return virtualIndex;
+    },
+    [hasSortFilter, visibleRowIndices],
+  );
 
-    if (startRow < 0 || lastRow < startRow) {
-      setError("Row range is invalid.");
-      return;
-    }
-    if (rows.length === 0) {
-      setError("No rows loaded.");
-      return;
-    }
+  const isRowLoaded = useCallback(
+    (rowIndex: number) => rowIndex >= windowStart && rowIndex < windowStart + rows.length,
+    [rows.length, windowStart],
+  );
 
-    let regex: RegExp | null = null;
-    if (useRegex) {
+  const gridTemplateColumns = useMemo(
+    () => `48px repeat(${selectionColumnCount}, minmax(120px, 1fr))`,
+    [selectionColumnCount],
+  );
+
+  const parentRef = useRef<HTMLDivElement | null>(null);
+
+  const rowVirtualizer = useVirtualizer({
+    count: totalRowCount,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 32,
+    overscan: 12,
+    onChange: (instance) => {
+      if (fileMode !== "csv" || hasSortFilter) return;
+      if (windowLoading) return;
+      const items = instance.getVirtualItems();
+      if (!items.length) return;
+      const first = items[0].index;
+      const last = items[items.length - 1].index;
+      const maxStart = Math.max(totalRowCount - windowSize, 0);
+
+      if (last >= windowStart + rows.length - 20 && windowStart < maxStart) {
+        const nextStart = Math.min(Math.max(last - Math.floor(windowSize * 0.7), 0), maxStart);
+        if (nextStart !== windowStart) {
+          void loadWindow(nextStart);
+        }
+      } else if (first <= windowStart + 20 && windowStart > 0) {
+        const nextStart = Math.max(Math.min(first - Math.floor(windowSize * 0.3), maxStart), 0);
+        if (nextStart !== windowStart) {
+          void loadWindow(nextStart);
+        }
+      }
+    },
+  });
+
+  const inferType = useCallback(
+    (values: string[]) => {
+      if (!values.length) return t("Empty", "空");
+      const isNumber = values.every((value) => {
+        if (value.trim() === "") return false;
+        return !Number.isNaN(Number(value));
+      });
+      if (isNumber) return t("Number", "数字");
+      const isBoolean = values.every((value) => {
+        const normalized = value.trim().toLowerCase();
+        return ["true", "false", "0", "1"].includes(normalized);
+      });
+      if (isBoolean) return t("Boolean", "布尔");
+      return t("Text", "文本");
+    },
+    [t],
+  );
+
+  const columnStats = useMemo(() => {
+    if (!rows.length || dataColumnCount === 0) return [];
+    return Array.from({ length: dataColumnCount }, (_, colIndex) => {
+      const values = rows.map((_, rowIndex) => getCellValue(windowStart + rowIndex, colIndex));
+      const nonEmptyValues = values.filter((value) => value !== "");
+      return {
+        name: headers[colIndex] ?? t(`Column ${colIndex + 1}`, `列 ${colIndex + 1}`),
+        nonEmpty: nonEmptyValues.length,
+        distinct: new Set(nonEmptyValues).size,
+        inferred: inferType(nonEmptyValues),
+      };
+    });
+  }, [rows, dataColumnCount, headers, getCellValue, inferType, t]);
+
+  const resetSessionState = useCallback(() => {
+    setPatches({});
+    setUndoStack([]);
+    setRedoStack([]);
+    setSortRules([]);
+    setFilterRules([]);
+    resetOps();
+    resetFileOps();
+    clearSelection();
+    setEditingCell(null);
+    setTotalRows(null);
+    setWindowStart(0);
+    setWindowSize(400);
+  }, [clearSelection, resetFileOps, resetOps]);
+
+  const refreshTotalRows = useCallback(
+    async (path: string, delimiterValue?: string) => {
       try {
-        regex = new RegExp(findText, matchCase ? "g" : "gi");
+        const count = await invoke<number>("count_csv_rows", {
+          path,
+          delimiter: delimiterValue ?? delimiter,
+        });
+        setTotalRows(count);
       } catch (err) {
-        setError(`Invalid regex: ${String(err)}`);
+        setError(String(err));
+        setTotalRows(null);
+      }
+    },
+    [delimiter],
+  );
+
+  const estimateWindowSize = useCallback((sampleRows: string[][]) => {
+    if (!sampleRows.length) return;
+    const bytesPerRow =
+      sampleRows.reduce((total, row) => {
+        const rowBytes = row.reduce((sum, cell) => sum + cell.length * 2, 0);
+        return total + rowBytes;
+      }, 0) / sampleRows.length;
+    if (!bytesPerRow || !Number.isFinite(bytesPerRow)) return;
+    const safeBytes = MEMORY_BUDGET_BYTES * 0.6;
+    const maxRows = Math.max(50, Math.floor(safeBytes / Math.max(bytesPerRow, 128)));
+    const clamped = Math.min(Math.max(maxRows, 200), 20000);
+    setWindowSize(clamped);
+  }, []);
+
+  const loadWindow = useCallback(
+    async (start: number, pathOverride?: string, delimiterOverride?: string) => {
+      const path = pathOverride ?? preview?.path ?? activePath;
+      if (!path) return;
+      setWindowLoading(true);
+      try {
+        const slice = await invoke<{
+          rows: string[][];
+          start: number;
+          end: number;
+          eof: boolean;
+        }>("read_csv_rows_window", {
+          path,
+          delimiter: delimiterOverride ?? delimiterApplied ?? preview?.delimiter ?? delimiter,
+          start,
+          limit: windowSize,
+        });
+        setRows(slice.rows);
+        setWindowStart(slice.start);
+        setEof(slice.eof);
+        estimateWindowSize(slice.rows);
+      } catch (err) {
+        setError(String(err));
+      } finally {
+        setWindowLoading(false);
+      }
+    },
+    [
+      preview,
+      activePath,
+      delimiterApplied,
+      delimiter,
+      windowSize,
+      setRows,
+      setEof,
+      estimateWindowSize,
+    ],
+  );
+
+  const loadNextWindow = useCallback(async () => {
+    const nextStart = windowStart + rows.length;
+    if (totalRowCount !== null && nextStart >= totalRowCount) return;
+    await loadWindow(nextStart);
+  }, [windowStart, rows.length, totalRowCount, loadWindow]);
+
+  const handleOpen = async () => {
+    if (openDialogActiveRef.current) return;
+    openDialogActiveRef.current = true;
+    try {
+      const selected = await openDialog({
+        multiple: false,
+        filters: [
+          { name: "CSV", extensions: ["csv"] },
+          { name: "Text", extensions: ["txt", "log", "md"] },
+        ],
+      });
+
+      if (!selected || Array.isArray(selected)) return;
+
+      const path = selected;
+      const isCsv = path.toLowerCase().endsWith(".csv");
+
+      if (isCsv) {
+        resetTextSession();
+        await closeSession();
+        const info = await openCsvPath(path);
+        if (!info) return;
+        setFileMode("csv");
+        resetSessionState();
+        await loadWindow(0, path, info.delimiter);
+        void refreshTotalRows(path, info.delimiter);
         return;
       }
-    }
 
-    setError(null);
-    let applied = 0;
-
-    for (let rowIndex = startRow; rowIndex <= lastRow && rowIndex < rows.length; rowIndex += 1) {
-      const columns = columnIndex === null
-        ? headers.map((_, idx) => idx)
-        : [columnIndex];
-      columns.forEach((col) => {
-        if (col < 0 || col >= headers.length) return;
-        const current = getCellValue(rowIndex, col);
-        let next = current;
-        if (useRegex && regex) {
-          next = current.replace(regex, replaceText);
-        } else if (matchCase) {
-          next = current.split(findText).join(replaceText);
-        } else {
-          const pattern = new RegExp(findText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-          next = current.replace(pattern, replaceText);
-        }
-        if (next !== current) {
-          applyPatch(rowIndex, col, next);
-          applied += 1;
-        }
-      });
-    }
-
-    setFindAppliedCount(applied);
-  };
-
-  const runFindReplaceOnFile = async () => {
-    if (!preview) return;
-    if (!findText) {
-      setError("Find text is required.");
-      return;
-    }
-    const columnIndex = parseOptionalIndex(findColumnInput) ?? undefined;
-
-    const target = await saveDialog({
-      defaultPath: preview.path.replace(/\.(csv|txt)$/i, "_findreplace.csv"),
-      filters: [{ name: "CSV", extensions: ["csv"] }],
-    });
-
-    if (!target || Array.isArray(target)) return;
-
-    setError(null);
-    setLoading(true);
-    try {
-      const spec: FindReplaceSpec = {
-        find: findText,
-        replace: replaceText,
-        column: columnIndex,
-        regex: useRegex,
-        match_case: matchCase,
-      };
-      const result = await invoke<FindReplaceResult>("apply_find_replace_to_file", {
-        path: preview.path,
-        targetPath: target,
-        delimiter: dialectDelimiter || preview.delimiter,
-        spec,
-        eol: eolMode,
-        bom: includeBom,
-        encoding: encodingMode,
-        quote: dialectQuote,
-        escape: dialectEscape,
-      });
-      setFindAppliedCount(result.applied);
-      setFindOutputPath(result.output_path);
-    } catch (err) {
-      setError(String(err));
+      resetSessionState();
+      await closeSession();
+      const opened = await openText(path);
+      if (!opened) return;
+      setFileMode("text");
     } finally {
-      setLoading(false);
+      openDialogActiveRef.current = false;
     }
   };
 
-  const runMacroOnFile = async () => {
-    if (!preview) return;
-    const columnIndex = Number.parseInt(macroColumn, 10);
-    if (Number.isNaN(columnIndex) || columnIndex < 0) {
-      setError("Macro column must be a non-negative number.");
-      return;
-    }
-    if (macroOp === "replace" && !macroFind) {
-      setError("Find value is required for replace.");
-      return;
-    }
+  const handleApplyDelimiter = async () => {
+    if (fileMode !== "csv") return;
+    const info = await applyDelimiter();
+    if (!info) return;
+    resetSessionState();
+    await loadWindow(0, info.path, info.delimiter);
+    void refreshTotalRows(info.path, info.delimiter);
+  };
 
-    const target = await saveDialog({
-      defaultPath: preview.path.replace(/\.(csv|txt)$/i, "_macro.csv"),
-      filters: [{ name: "CSV", extensions: ["csv"] }],
-    });
-
-    if (!target || Array.isArray(target)) return;
-
+  const clearEdits = () => {
+    setPatches({});
+    setUndoStack([]);
+    setRedoStack([]);
+    resetOps();
+    resetFileOps();
+    setEditingCell(null);
     setError(null);
-    setLoading(true);
-    try {
-      const spec: CsvMacroSpec = {
-        op: macroOp,
-        column: columnIndex,
-        find: macroFind || undefined,
-        replace: macroReplace || undefined,
-        text: macroText || undefined,
-      };
-      const result = await invoke<CsvMacroResult>("apply_macro_to_file", {
-        path: preview.path,
-        targetPath: target,
-        delimiter: dialectDelimiter || preview.delimiter,
-        spec,
-        eol: eolMode,
-        bom: includeBom,
-        encoding: encodingMode,
-        quote: dialectQuote,
-        escape: dialectEscape,
-      });
-      setMacroAppliedCount(result.applied);
-      setMacroOutputPath(result.output_path);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setLoading(false);
-    }
   };
+
+  const saveTextAs = async () => {
+    const defaultPath = textPath ?? "untitled.txt";
+    const target = await saveDialog({
+      defaultPath,
+      filters: [{ name: "Text", extensions: ["txt"] }],
+    });
+    if (!target || Array.isArray(target)) return;
+    await saveTextTo(target);
+  };
+
+  useEffect(() => {
+    window.localStorage.setItem("nmeditor.locale", locale);
+    void invoke("set_menu_locale", { locale });
+  }, [locale]);
+
+  const showAboutDialog = async () => {
+    await message(t("nmeditor — Streamed CSV editor.", "nmeditor — 流式CSV编辑器。"), {
+      title: t("About", "关于"),
+      kind: "info",
+    });
+  };
+
+  const menuHandlersRef = useRef({
+    handleOpen,
+    saveAs,
+    saveTextAs,
+    runMacroOnFile,
+    runFindReplaceOnFile,
+    undo,
+    redo,
+    clearEdits,
+    loadNextWindow,
+    runFullStats,
+    applyFindReplace,
+    runMacro,
+    setShowQuickbar,
+    setShowFindBar,
+    setShowMacroPanel,
+    setShowOpsPanel,
+    setShowExportPanel,
+    setShowFindPanel,
+    setShowStatsPanel,
+    setError,
+    locale,
+    showAboutDialog,
+    fileMode,
+  });
+
+  useEffect(() => {
+    menuHandlersRef.current = {
+      handleOpen,
+      saveAs,
+      saveTextAs,
+      runMacroOnFile,
+      runFindReplaceOnFile,
+      undo,
+      redo,
+      clearEdits,
+      loadNextWindow,
+      runFullStats,
+      applyFindReplace,
+      runMacro,
+      setShowQuickbar,
+      setShowFindBar,
+      setShowMacroPanel,
+      setShowOpsPanel,
+      setShowExportPanel,
+      setShowFindPanel,
+      setShowStatsPanel,
+      setError,
+      locale,
+      showAboutDialog,
+      fileMode,
+    };
+  }, [
+    handleOpen,
+    saveAs,
+    saveTextAs,
+    runMacroOnFile,
+    runFindReplaceOnFile,
+    undo,
+    redo,
+    clearEdits,
+    loadNextWindow,
+    runFullStats,
+    applyFindReplace,
+    runMacro,
+    setShowQuickbar,
+    setShowFindBar,
+    setShowMacroPanel,
+    setShowOpsPanel,
+    setShowExportPanel,
+    setShowFindPanel,
+    setShowStatsPanel,
+    setError,
+    locale,
+    showAboutDialog,
+    fileMode,
+  ]);
+
+  const menuListenerRef = useRef<null | (() => void)>(null);
+
+  useEffect(() => {
+    if (menuListenerRef.current) return;
+    let disposed = false;
+    const setup = async () => {
+      const unlisten = await listen<string>("menu-event", (event) => {
+        const handlers = menuHandlersRef.current;
+        switch (event.payload) {
+          case "file_open":
+            void handlers.handleOpen();
+            break;
+          case "file_save_as":
+            if (handlers.fileMode === "text") {
+              void handlers.saveTextAs();
+            } else {
+              void handlers.saveAs();
+            }
+            break;
+          case "file_macro":
+            if (handlers.fileMode === "csv") {
+              void handlers.runMacroOnFile();
+            }
+            break;
+          case "file_find_replace":
+            if (handlers.fileMode === "csv") {
+              void handlers.runFindReplaceOnFile();
+            }
+            break;
+          case "edit_undo":
+            if (handlers.fileMode === "csv") {
+              handlers.undo();
+            }
+            break;
+          case "edit_redo":
+            if (handlers.fileMode === "csv") {
+              handlers.redo();
+            }
+            break;
+          case "edit_clear":
+            if (handlers.fileMode === "csv") {
+              handlers.clearEdits();
+            }
+            break;
+          case "view_load_more":
+            if (handlers.fileMode === "csv") {
+              void handlers.loadNextWindow();
+            }
+            break;
+          case "view_stats":
+            if (handlers.fileMode === "csv") {
+              void handlers.runFullStats();
+            }
+            break;
+          case "view_toggle_quickbar":
+            handlers.setShowQuickbar((current) => !current);
+            break;
+          case "view_toggle_findbar":
+            handlers.setShowFindBar((current) => !current);
+            break;
+          case "view_toggle_macro":
+            handlers.setShowMacroPanel((current) => !current);
+            break;
+          case "view_toggle_ops":
+            handlers.setShowOpsPanel((current) => !current);
+            break;
+          case "view_toggle_export":
+            handlers.setShowExportPanel((current) => !current);
+            break;
+          case "view_toggle_find_panel":
+            handlers.setShowFindPanel((current) => !current);
+            break;
+          case "view_toggle_stats_panel":
+            handlers.setShowStatsPanel((current) => !current);
+            break;
+          case "tools_find_loaded":
+            if (handlers.fileMode === "csv") {
+              handlers.applyFindReplace();
+            }
+            break;
+          case "tools_macro_loaded":
+            if (handlers.fileMode === "csv") {
+              handlers.runMacro();
+            }
+            break;
+          case "help_about":
+            void handlers.showAboutDialog();
+            break;
+          default:
+            break;
+        }
+      });
+
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      menuListenerRef.current = unlisten;
+    };
+
+    void setup();
+    return () => {
+      disposed = true;
+      if (menuListenerRef.current) {
+        menuListenerRef.current();
+        menuListenerRef.current = null;
+      }
+    };
+  }, []);
 
   return (
     <div className="app-shell">
-      <nav className="menu-bar">
-        <div className="menu-group">File</div>
-        <div className="menu-group">Edit</div>
-        <div className="menu-group">View</div>
-        <div className="menu-group">Tools</div>
-        <div className="menu-group">Help</div>
-      </nav>
-      <header className="toolbar">
-        <div className="brand">
-          <span className="dot" />
-          <div>
-            <div className="title">DeskCSV</div>
-            <div className="subtitle">Streamed CSV editor (preview mode)</div>
+      {fileMode === "text" ? (
+        <section className="surface">
+          <div className="text-toolbar">
+            <div className="text-meta">
+              <span className="label">{t("Text file", "文本文件")}</span>
+              <span className="value">{textPath ?? t("Select a file", "选择文件")}</span>
+              {textDirty ? <span className="dirty">{t("(modified)", "(已修改)")}</span> : null}
+            </div>
+            <div className="text-actions">
+              <button onClick={saveTextAs} disabled={textLoading}>
+                {t("Save As", "另存为")}
+              </button>
+            </div>
           </div>
-        </div>
-        <div className="controls">
-          <label className="field">
-            <span>Delimiter</span>
-            <select
-              value={delimiter}
-              onChange={(e) => setDelimiter(e.target.value)}
-              disabled={loading}
-            >
-              {delimiterPresets.map((d) => (
-                <option key={d.value} value={d.value}>
-                  {d.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button onClick={handleOpen} disabled={loading}>
-            {loading ? "Loading..." : "Open CSV"}
-          </button>
-          <button
-            onClick={applyDelimiter}
-            disabled={loading || !activePath || delimiterApplied === delimiter}
-          >
-            Apply delimiter
-          </button>
-          <button onClick={loadMore} disabled={loading || loadingRows || !preview || eof}>
-            {loadingRows ? "Loading rows..." : eof ? "All rows loaded" : "Load more"}
-          </button>
-          <button onClick={saveAs} disabled={loading || !preview || !Object.keys(patches).length}>
-            Save As
-          </button>
-          <button onClick={undo} disabled={!undoStack.length}>
-            Undo
-          </button>
-          <button onClick={redo} disabled={!redoStack.length}>
-            Redo
-          </button>
-        </div>
-      </header>
-
-      <section className="surface">
-        <div className="surface-header">
-          <div className="file-meta">
-            <span className="label">File</span>
-            <span className="value">{activePath ?? "Select a file"}</span>
-          </div>
-          <div className="file-meta">
-            <span className="label">Delimiter</span>
-            <span className="value">
-              {preview?.delimiter ?? delimiter}
-              {delimiterApplied && delimiterApplied !== delimiter
-                ? " (pending)"
-                : ""}
-            </span>
-          </div>
-          <div className="file-meta">
-            <span className="label">Rows (preview)</span>
-            <span className="value">{rows.length}</span>
-          </div>
-        </div>
-
-        <div className="macro-panel">
-          <div className="macro-title">Macro / Batch (loaded rows)</div>
-          <div className="macro-row">
-            <label className="field">
-              <span>Operation</span>
-              <select value={macroOp} onChange={(e) => setMacroOp(e.target.value as MacroOp)}>
-                <option value="replace">Find & Replace</option>
-                <option value="uppercase">Uppercase</option>
-                <option value="lowercase">Lowercase</option>
-                <option value="trim">Trim</option>
-                <option value="prefix">Add Prefix</option>
-                <option value="suffix">Add Suffix</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Column (0-based)</span>
-              <input
-                value={macroColumn}
-                onChange={(e) => setMacroColumn(e.target.value)}
-                placeholder="0"
+          <textarea
+            className="text-area"
+            value={textContent}
+            onChange={(event) => setTextContent(event.target.value)}
+            placeholder={t("Open a text file to start editing", "打开文本文件开始编辑")}
+            spellCheck={false}
+          />
+          {error ? <div className="banner error">{error}</div> : null}
+        </section>
+      ) : (
+        <section className="surface">
+          <div className="sticky-bars">
+            {showFindBar ? (
+              <FindBar
+                findText={findText}
+                replaceText={replaceText}
+                useRegex={useRegex}
+                matchCase={matchCase}
+                onFindChange={setFindText}
+                onReplaceChange={setReplaceText}
+                onToggleRegex={setUseRegex}
+                onToggleMatchCase={setMatchCase}
+                onApply={applyFindReplace}
+                onApplyFile={runFindReplaceOnFile}
+                disabled={!preview || loading}
+                t={t}
               />
-            </label>
-            {macroOp === "replace" ? (
-              <>
-                <label className="field">
-                  <span>Find</span>
-                  <input
-                    value={macroFind}
-                    onChange={(e) => setMacroFind(e.target.value)}
-                    placeholder="old"
-                  />
-                </label>
-                <label className="field">
-                  <span>Replace</span>
-                  <input
-                    value={macroReplace}
-                    onChange={(e) => setMacroReplace(e.target.value)}
-                    placeholder="new"
-                  />
-                </label>
-              </>
-            ) : macroOp === "prefix" || macroOp === "suffix" ? (
-              <label className="field">
-                <span>Text</span>
-                <input
-                  value={macroText}
-                  onChange={(e) => setMacroText(e.target.value)}
-                  placeholder="value"
-                />
-              </label>
             ) : null}
-            <button onClick={runMacro} disabled={!preview || loading}>
-              Run on loaded rows
-            </button>
-            <button onClick={runMacroOnFile} disabled={!preview || loading}>
-              Run on full file
-            </button>
+            {showQuickbar ? (
+              <Quickbar
+                locale={locale}
+                delimiter={delimiter}
+                delimiterApplied={delimiterApplied}
+                delimiterPresets={delimiterPresets}
+                loading={loading}
+                loadingRows={windowLoading}
+                eof={eof}
+                hasPreview={Boolean(preview)}
+                onLocaleChange={setLocale}
+                onDelimiterChange={setDelimiter}
+                onApplyDelimiter={handleApplyDelimiter}
+                onLoadMore={loadNextWindow}
+                onUndo={undo}
+                onRedo={redo}
+                onFindReplaceLoaded={applyFindReplace}
+                onMacroLoaded={runMacro}
+                canUndo={undoStack.length > 0}
+                canRedo={redoStack.length > 0}
+                t={t}
+              />
+            ) : null}
           </div>
-          {macroOutputPath ? (
-            <div className="macro-output">Saved: {macroOutputPath}</div>
-          ) : null}
-        </div>
+          <SurfaceHeader
+            activePath={activePath}
+            delimiter={delimiter}
+            delimiterApplied={delimiterApplied}
+            rowsLength={rows.length}
+            previewDelimiter={preview?.delimiter}
+            t={t}
+          />
 
-        <div className="ops-panel">
-          <div className="macro-title">Column / Sort / Filter</div>
-          <div className="macro-row">
-            <label className="field">
-              <span>Column index</span>
-              <input
-                value={columnIndexInput}
-                onChange={(e) => setColumnIndexInput(e.target.value)}
-                placeholder="0"
-              />
-            </label>
-            <label className="field">
-              <span>Column name</span>
-              <input
-                value={columnNameInput}
-                onChange={(e) => setColumnNameInput(e.target.value)}
-                placeholder="Name"
-              />
-            </label>
-            <button onClick={insertColumn} disabled={!preview || loading}>
-              Insert
-            </button>
-            <button onClick={deleteColumn} disabled={!preview || loading}>
-              Delete
-            </button>
-            <button onClick={renameColumn} disabled={!preview || loading}>
-              Rename
-            </button>
-          </div>
-          <div className="macro-row">
-            <label className="field">
-              <span>Sort column</span>
-              <input
-                value={sortColumnInput}
-                onChange={(e) => setSortColumnInput(e.target.value)}
-                placeholder="0"
-              />
-            </label>
-            <label className="field">
-              <span>Direction</span>
-              <select
-                value={sortDirection}
-                onChange={(e) => setSortDirection(e.target.value as "asc" | "desc")}
-              >
-                <option value="asc">Ascending</option>
-                <option value="desc">Descending</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Filter column</span>
-              <input
-                value={filterColumnInput}
-                onChange={(e) => setFilterColumnInput(e.target.value)}
-                placeholder="0"
-              />
-            </label>
-            <label className="field">
-              <span>Filter text</span>
-              <input
-                value={filterText}
-                onChange={(e) => setFilterText(e.target.value)}
-                placeholder="contains..."
-              />
-            </label>
-            <button onClick={addSortRule} disabled={!sortColumnInput}>
-              Add sort
-            </button>
-            <button onClick={addFilterRule} disabled={!filterColumnInput || !filterText}>
-              Add filter
-            </button>
-            <button onClick={clearSortFilter} disabled={!sortRules.length && !filterRules.length}>
-              Clear
-            </button>
-          </div>
-          {(sortRules.length || filterRules.length) ? (
-            <div className="rules-list">
-              {sortRules.map((rule, idx) => (
-                <div key={`sort-${idx}`} className="rule-item">
-                  <span>{`Sort col ${rule.column} (${rule.direction})`}</span>
-                  <button onClick={() => removeSortRule(idx)}>×</button>
-                </div>
-              ))}
-              {filterRules.map((rule, idx) => (
-                <div key={`filter-${idx}`} className="rule-item">
-                  <span>{`Filter col ${rule.column} contains "${rule.value}"`}</span>
-                  <button onClick={() => removeFilterRule(idx)}>×</button>
-                </div>
-              ))}
-            </div>
-          ) : null}
-        </div>
+          <Panels
+            showMacroPanel={showMacroPanel}
+            showOpsPanel={showOpsPanel}
+            showExportPanel={showExportPanel}
+            showFindPanel={showFindPanel}
+            showStatsPanel={showStatsPanel}
+            macroOp={macroOp}
+            macroColumn={macroColumn}
+            macroFind={macroFind}
+            macroReplace={macroReplace}
+            macroText={macroText}
+            macroOutputPath={macroOutputPath}
+            onMacroOpChange={setMacroOp}
+            onMacroColumnChange={setMacroColumn}
+            onMacroFindChange={setMacroFind}
+            onMacroReplaceChange={setMacroReplace}
+            onMacroTextChange={setMacroText}
+            onRunMacro={runMacro}
+            onRunMacroOnFile={runMacroOnFile}
+            rowIndexInput={rowIndexInput}
+            columnIndexInput={columnIndexInput}
+            columnNameInput={columnNameInput}
+            onRowIndexChange={setRowIndexInput}
+            onColumnIndexChange={setColumnIndexInput}
+            onColumnNameChange={setColumnNameInput}
+            onInsertRow={insertRow}
+            onDeleteRow={deleteRow}
+            onCopySelection={copySelection}
+            onPasteSelection={pasteSelection}
+            onInsertColumn={insertColumn}
+            onDeleteColumn={deleteColumn}
+            onRenameColumn={renameColumn}
+            sortColumnInput={sortColumnInput}
+            sortDirection={sortDirection}
+            filterColumnInput={filterColumnInput}
+            filterText={filterText}
+            onSortColumnChange={setSortColumnInput}
+            onSortDirectionChange={setSortDirection}
+            onFilterColumnChange={setFilterColumnInput}
+            onFilterTextChange={setFilterText}
+            onAddSortRule={addSortRule}
+            onAddFilterRule={addFilterRule}
+            onClearSortFilter={clearSortFilter}
+            sortRules={sortRules}
+            filterRules={filterRules}
+            onRemoveSortRule={removeSortRule}
+            onRemoveFilterRule={removeFilterRule}
+            encodingMode={encodingMode}
+            eolMode={eolMode}
+            includeBom={includeBom}
+            dialectDelimiter={dialectDelimiter}
+            dialectQuote={dialectQuote}
+            dialectEscape={dialectEscape}
+            onEncodingModeChange={setEncodingMode}
+            onEolModeChange={setEolMode}
+            onIncludeBomChange={setIncludeBom}
+            onDialectDelimiterChange={setDialectDelimiter}
+            onDialectQuoteChange={setDialectQuote}
+            onDialectEscapeChange={setDialectEscape}
+            findText={findText}
+            replaceText={replaceText}
+            findColumnInput={findColumnInput}
+            findStartRow={findStartRow}
+            findEndRow={findEndRow}
+            useRegex={useRegex}
+            matchCase={matchCase}
+            findOutputPath={findOutputPath}
+            onFindTextChange={setFindText}
+            onReplaceTextChange={setReplaceText}
+            onFindColumnChange={setFindColumnInput}
+            onFindStartRowChange={setFindStartRow}
+            onFindEndRowChange={setFindEndRow}
+            onUseRegexChange={setUseRegex}
+            onMatchCaseChange={setMatchCase}
+            onApplyFindReplace={applyFindReplace}
+            onApplyFindReplaceOnFile={runFindReplaceOnFile}
+            columnStats={columnStats}
+            fullStats={fullStats}
+            fullStatsLoading={fullStatsLoading}
+            onRunFullStats={runFullStats}
+            loading={loading}
+            hasPreview={Boolean(preview)}
+            t={t}
+          />
 
-        <div className="ops-panel">
-          <div className="macro-title">Export Options</div>
-          <div className="macro-row">
-            <label className="field">
-              <span>Encoding</span>
-              <select
-                value={encodingMode}
-                onChange={(e) => setEncodingMode(e.target.value as "UTF-8" | "UTF-16LE")}
-              >
-                <option value="UTF-8">UTF-8</option>
-                <option value="UTF-16LE">UTF-16 LE</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>EOL</span>
-              <select value={eolMode} onChange={(e) => setEolMode(e.target.value as "CRLF" | "LF")}>
-                <option value="CRLF">Windows (CRLF)</option>
-                <option value="LF">Unix (LF)</option>
-              </select>
-            </label>
-            <label className="field checkbox">
-              <span>UTF-8 BOM</span>
-              <input
-                type="checkbox"
-                checked={includeBom}
-                onChange={(e) => setIncludeBom(e.target.checked)}
-              />
-            </label>
-            <label className="field">
-              <span>Delimiter</span>
-              <input
-                value={dialectDelimiter}
-                onChange={(e) => setDialectDelimiter(e.target.value)}
-                placeholder="," 
-              />
-            </label>
-            <label className="field">
-              <span>Quote</span>
-              <input
-                value={dialectQuote}
-                onChange={(e) => setDialectQuote(e.target.value)}
-                placeholder={'"'}
-              />
-            </label>
-            <label className="field">
-              <span>Escape</span>
-              <input
-                value={dialectEscape}
-                onChange={(e) => setDialectEscape(e.target.value)}
-                placeholder={'"'}
-              />
-            </label>
-          </div>
-        </div>
+          {error ? <div className="banner error">{error}</div> : null}
 
-        <div className="find-panel">
-          <div className="macro-title">Find / Replace (loaded rows)</div>
-          <div className="macro-row">
-            <label className="field">
-              <span>Find</span>
-              <input value={findText} onChange={(e) => setFindText(e.target.value)} />
-            </label>
-            <label className="field">
-              <span>Replace</span>
-              <input value={replaceText} onChange={(e) => setReplaceText(e.target.value)} />
-            </label>
-            <label className="field">
-              <span>Column (optional)</span>
-              <input
-                value={findColumnInput}
-                onChange={(e) => setFindColumnInput(e.target.value)}
-                placeholder="all"
-              />
-            </label>
-            <label className="field">
-              <span>Start row</span>
-              <input
-                value={findStartRow}
-                onChange={(e) => setFindStartRow(e.target.value)}
-                placeholder="0"
-              />
-            </label>
-            <label className="field">
-              <span>End row</span>
-              <input
-                value={findEndRow}
-                onChange={(e) => setFindEndRow(e.target.value)}
-                placeholder="last"
-              />
-            </label>
-            <label className="field checkbox">
-              <span>Regex</span>
-              <input
-                type="checkbox"
-                checked={useRegex}
-                onChange={(e) => setUseRegex(e.target.checked)}
-              />
-            </label>
-            <label className="field checkbox">
-              <span>Match case</span>
-              <input
-                type="checkbox"
-                checked={matchCase}
-                onChange={(e) => setMatchCase(e.target.checked)}
-              />
-            </label>
-            <button onClick={applyFindReplace} disabled={!preview || loading}>
-              Apply find/replace
-            </button>
-            <button onClick={runFindReplaceOnFile} disabled={!preview || loading}>
-              Apply on full file
-            </button>
-          </div>
-          {findOutputPath ? (
-            <div className="macro-output">Saved: {findOutputPath}</div>
-          ) : null}
-        </div>
+          <GridView
+            headers={headers}
+            gridTemplateColumns={gridTemplateColumns}
+            isRowLoaded={isRowLoaded}
+            getRowIndex={getRowIndex}
+            parentRef={parentRef}
+            rowVirtualizer={rowVirtualizer}
+            editingCell={editingCell}
+            patches={patches}
+            getCellValue={getCellValue}
+            startEditing={startEditing}
+            setEditingCell={setEditingCell}
+            commitEditing={commitEditing}
+            cancelEditing={cancelEditing}
+            onClearSelection={clearSelection}
+            isRowInSelection={isRowInSelection}
+            isColInSelection={isColInSelection}
+            isCellInSelection={isCellInSelection}
+            updateSelection={updateSelection}
+            setIsDraggingSelection={setIsDraggingSelection}
+            isDraggingSelection={isDraggingSelection}
+            selectionMode={selectionMode}
+            t={t}
+          />
+        </section>
+      )}
 
-        <div className="stats-panel">
-          <div className="stats-header">
-            <div className="macro-title">Column Stats</div>
-            <button onClick={runFullStats} disabled={!preview || fullStatsLoading}>
-              {fullStatsLoading ? "Computing..." : "Compute full file"}
-            </button>
-          </div>
-          {columnStats.length ? (
-            <>
-              <div className="stats-subtitle">Loaded rows</div>
-              <div className="stats-table">
-                <div className="stats-row stats-header">
-                  <div>Column</div>
-                  <div>Non-empty</div>
-                  <div>Distinct</div>
-                  <div>Type</div>
-                </div>
-                {columnStats.map((stat, idx) => (
-                  <div key={`${stat.name}-${idx}`} className="stats-row">
-                    <div>{stat.name}</div>
-                    <div>{stat.nonEmpty}</div>
-                    <div>{stat.distinct}</div>
-                    <div>{stat.inferred}</div>
-                  </div>
-                ))}
-              </div>
-            </>
-          ) : (
-            <div className="stats-empty">Load rows to see column statistics.</div>
-          )}
-          {fullStats ? (
-            <>
-              <div className="stats-subtitle">Full file</div>
-              <div className="stats-table">
-                <div className="stats-row stats-header">
-                  <div>Column</div>
-                  <div>Non-empty</div>
-                  <div>Distinct</div>
-                  <div>Type</div>
-                </div>
-                {fullStats.map((stat, idx) => (
-                  <div key={`${stat.name}-${idx}`} className="stats-row">
-                    <div>{stat.name}</div>
-                    <div>{stat.non_empty}</div>
-                    <div>
-                      {stat.distinct}
-                      {stat.distinct_truncated ? "+" : ""}
-                    </div>
-                    <div>{stat.inferred}</div>
-                  </div>
-                ))}
-              </div>
-            </>
-          ) : null}
-        </div>
-
-        {error ? <div className="banner error">{error}</div> : null}
-
-        <div className="grid-shell">
-          <div className="grid-header" style={{ gridTemplateColumns: columnTemplate }}>
-            {(headers.length ? headers : ["Column 1", "Column 2", "Column 3"]).map(
-              (col, idx) => (
-                <div key={idx} className="cell header">
-                  {col}
-                </div>
-              ),
-            )}
-          </div>
-
-          <div className="grid-body" ref={parentRef}>
-            <div
-              style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: "relative" }}
-            >
-              {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                const rowIndex = visibleRowIndices[virtualRow.index];
-                if (rowIndex === undefined) {
-                  return null;
-                }
-                return (
-                  <div
-                    key={virtualRow.key}
-                    className="grid-row"
-                    style={{
-                      transform: `translateY(${virtualRow.start}px)`,
-                      gridTemplateColumns: columnTemplate,
-                    }}
-                  >
-                    {(headers.length ? headers : new Array(3).fill(""))
-                      .map((_, colIdx) => {
-                        const isEditing =
-                          editingCell?.row === rowIndex &&
-                          editingCell?.col === colIdx;
-                        const key = getCellKey(rowIndex, colIdx);
-                        const isPatched = patches[key] !== undefined;
-                        return (
-                          <div
-                            key={colIdx}
-                            className={`cell${isEditing ? " editing" : ""}${isPatched ? " edited" : ""}`}
-                            onDoubleClick={() => startEditing(rowIndex, colIdx)}
-                          >
-                            {isEditing ? (
-                              <input
-                                value={editingCell?.value ?? ""}
-                                onChange={(event) =>
-                                  setEditingCell((current) =>
-                                    current
-                                      ? { ...current, value: event.target.value }
-                                      : current,
-                                  )
-                                }
-                                onBlur={commitEditing}
-                                onKeyDown={(event) => {
-                                  if (event.key === "Enter") {
-                                    commitEditing();
-                                  }
-                                  if (event.key === "Escape") {
-                                    cancelEditing();
-                                  }
-                                }}
-                                autoFocus
-                              />
-                            ) : (
-                              getCellValue(rowIndex, colIdx)
-                            )}
-                          </div>
-                        );
-                      })}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <footer className="status-bar">
-        <span>
-          {loading
-            ? "Opening file..."
-            : loadingRows
-              ? "Loading rows..."
-              : preview
-                ? eof
-                  ? `Rows: ${rows.length} (EOF)`
-                  : `Rows: ${rows.length}`
-                : "Waiting for file"}
-        </span>
-        <span>
-          {preview
-            ? `Visible ${visibleRowIndices.length} · Edits ${Object.keys(patches).length} · Macro ${macroAppliedCount} · Find ${findAppliedCount}`
-            : ""}
-        </span>
-      </footer>
+      {fileMode === "text" ? (
+        <footer className="status-bar">
+          <span>
+            {textLoading
+              ? t("Loading text...", "加载文本中...")
+              : textPath
+                ? t("Text mode", "文本模式")
+                : t("Waiting for file", "等待选择文件")}
+          </span>
+          <span>
+            {textPath
+              ? t(
+                  `Length ${textContent.length} · Lines ${textContent.split(/\r?\n/).length}`,
+                  `长度 ${textContent.length} · 行数 ${textContent.split(/\r?\n/).length}`,
+                )
+              : ""}
+          </span>
+        </footer>
+      ) : (
+        <StatusBar
+          loading={loading}
+          loadingRows={windowLoading}
+          hasPreview={Boolean(preview)}
+          eof={eof}
+          rowsLength={rows.length}
+          visibleCount={hasSortFilter ? visibleRowIndices.length : rows.length}
+          patchCount={Object.keys(patches).length}
+          macroAppliedCount={macroAppliedCount}
+          findAppliedCount={findAppliedCount}
+          t={t}
+        />
+      )}
     </div>
   );
 }
