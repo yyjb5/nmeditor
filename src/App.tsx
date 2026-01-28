@@ -44,11 +44,14 @@ function App() {
   const [columnWidths, setColumnWidths] = useState<number[]>([]);
   const [rowHeaderWidth, setRowHeaderWidth] = useState(52);
   const [rowHeight, setRowHeight] = useState(20);
+  const [headerHeightOverride, setHeaderHeightOverride] = useState<number | null>(null);
   const [rowHeightOverrides, setRowHeightOverrides] = useState<Record<number, number>>({});
   const [autoFitColumns, setAutoFitColumns] = useState(false);
   const resizeStateRef = useRef<
     | { type: "col"; index: number; startX: number; startWidth: number }
+    | { type: "colAll"; startX: number; startWidths: number[]; startRowHeaderWidth: number }
     | { type: "row"; startX: number; startWidth: number }
+    | { type: "headerRow"; startY: number; startHeight: number }
     | { type: "rowHeightAll"; startY: number; startHeight: number }
     | { type: "rowHeightRow"; rowIndex: number; startY: number; startHeight: number }
     | null
@@ -159,6 +162,7 @@ function App() {
         columnWidths?: number[];
         rowHeaderWidth?: number;
         rowHeight?: number;
+        headerHeightOverride?: number;
         rowHeightOverrides?: Record<string, number>;
         autoFitColumns?: boolean;
       };
@@ -170,6 +174,9 @@ function App() {
       }
       if (typeof parsed.rowHeight === "number") {
         setRowHeight(Math.max(18, Math.min(300, parsed.rowHeight)));
+      }
+      if (typeof parsed.headerHeightOverride === "number") {
+        setHeaderHeightOverride(Math.max(18, Math.min(300, parsed.headerHeightOverride)));
       }
       if (parsed.rowHeightOverrides && typeof parsed.rowHeightOverrides === "object") {
         const next: Record<number, number> = {};
@@ -196,11 +203,22 @@ function App() {
         columnWidths,
         rowHeaderWidth,
         rowHeight,
+        headerHeightOverride,
         rowHeightOverrides,
         autoFitColumns,
       }),
     );
-  }, [columnWidths, rowHeaderWidth, rowHeight, rowHeightOverrides, autoFitColumns, layoutStorageKey]);
+  }, [
+    columnWidths,
+    rowHeaderWidth,
+    rowHeight,
+    headerHeightOverride,
+    rowHeightOverrides,
+    autoFitColumns,
+    layoutStorageKey,
+  ]);
+
+  const selectionRowCount = fileMode === "csv" ? (totalRows ?? rows.length) : rows.length;
 
   const {
     selectionMode,
@@ -212,7 +230,7 @@ function App() {
     isCellInSelection,
     isRowInSelection,
     isColInSelection,
-  } = useSelection(rows.length, selectionColumnCount);
+  } = useSelection(selectionRowCount, selectionColumnCount);
 
   const getCellValue = useCallback(
     (row: number, col: number) => {
@@ -648,12 +666,29 @@ function App() {
     resizeStateRef.current = { type: "col", index, startX: clientX, startWidth };
   };
 
+  const startColumnResizeAll = (clientX: number) => {
+    const startWidths = columnWidths.length
+      ? [...columnWidths]
+      : new Array(selectionColumnCount).fill(140);
+    resizeStateRef.current = {
+      type: "colAll",
+      startX: clientX,
+      startWidths,
+      startRowHeaderWidth: rowHeaderWidth,
+    };
+  };
+
   const startRowHeaderResize = (clientX: number) => {
     resizeStateRef.current = { type: "row", startX: clientX, startWidth: rowHeaderWidth };
   };
 
   const startRowHeightResizeAll = (clientY: number) => {
     resizeStateRef.current = { type: "rowHeightAll", startY: clientY, startHeight: rowHeight };
+  };
+
+  const startHeaderRowHeightResize = (clientY: number) => {
+    const startHeight = headerHeightOverride ?? rowHeight;
+    resizeStateRef.current = { type: "headerRow", startY: clientY, startHeight };
   };
 
   const startRowHeightResizeRow = (rowIndex: number, clientY: number) => {
@@ -678,15 +713,24 @@ function App() {
           next[state.index] = nextWidth;
           return next;
         });
+      } else if (state.type === "colAll") {
+        const delta = event.clientX - state.startX;
+        setRowHeaderWidth(Math.max(36, state.startRowHeaderWidth + delta));
+        setColumnWidths(state.startWidths.map((width) => Math.max(60, width + delta)));
       } else if (state.type === "row") {
         const delta = event.clientX - state.startX;
         const nextWidth = Math.max(36, state.startWidth + delta);
         setRowHeaderWidth(nextWidth);
+      } else if (state.type === "headerRow") {
+        const delta = event.clientY - state.startY;
+        const nextHeight = Math.max(18, Math.min(300, state.startHeight + delta));
+        setHeaderHeightOverride(nextHeight);
       } else if (state.type === "rowHeightAll") {
         const delta = event.clientY - state.startY;
         const nextHeight = Math.max(18, Math.min(300, state.startHeight + delta));
         setRowHeight(nextHeight);
         setRowHeightOverrides({});
+        setHeaderHeightOverride(null);
       } else {
         const delta = event.clientY - state.startY;
         const nextHeight = Math.max(18, Math.min(300, state.startHeight + delta));
@@ -1432,9 +1476,13 @@ function App() {
             isRowLoaded={isRowLoaded}
             getRowIndex={getRowIndex}
             onColumnResizeStart={startColumnResize}
+            onColumnResizeStartAll={startColumnResizeAll}
             onRowHeaderResizeStart={startRowHeaderResize}
             onRowHeightResizeStartAll={startRowHeightResizeAll}
             onRowHeightResizeStartRow={startRowHeightResizeRow}
+            onHeaderRowHeightResizeStart={startHeaderRowHeightResize}
+            rowHeight={rowHeight}
+            headerHeight={headerHeightOverride ?? rowHeight}
             getRowHeight={getRowHeight}
             parentRef={parentRef}
             rowVirtualizer={rowVirtualizer}

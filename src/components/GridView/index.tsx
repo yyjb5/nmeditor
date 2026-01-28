@@ -1,3 +1,4 @@
+import { useCallback, useRef } from "react";
 import "./styles.css";
 import type { GridViewProps } from "./types";
 
@@ -7,9 +8,12 @@ export default function GridView({
   isRowLoaded,
   getRowIndex,
   onColumnResizeStart,
+  onColumnResizeStartAll,
   onRowHeaderResizeStart,
   onRowHeightResizeStartAll,
   onRowHeightResizeStartRow,
+  onHeaderRowHeightResizeStart,
+  headerHeight,
   getRowHeight,
   parentRef,
   rowVirtualizer,
@@ -30,13 +34,23 @@ export default function GridView({
   selectionMode,
   t,
 }: GridViewProps) {
+  const headerRef = useRef<HTMLDivElement | null>(null);
+  const handleBodyScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
+    if (headerRef.current) {
+      headerRef.current.scrollLeft = event.currentTarget.scrollLeft;
+    }
+  }, []);
   const columns = headers.length
     ? headers
     : [t("Column 1", "列 1"), t("Column 2", "列 2"), t("Column 3", "列 3")];
 
   return (
     <div className="grid-shell">
-      <div className="grid-header" style={{ gridTemplateColumns }}>
+      <div
+        className="grid-header"
+        style={{ gridTemplateColumns, height: `${headerHeight}px` }}
+        ref={headerRef}
+      >
         <div
           className="cell header row-header"
           onMouseDown={(event) => {
@@ -52,7 +66,11 @@ export default function GridView({
             onMouseDown={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              onRowHeaderResizeStart(event.clientX);
+              if (onColumnResizeStartAll) {
+                onColumnResizeStartAll(event.clientX);
+              } else {
+                onRowHeaderResizeStart(event.clientX);
+              }
             }}
           />
           <span
@@ -91,11 +109,19 @@ export default function GridView({
                 onColumnResizeStart(idx, event.clientX);
               }}
             />
+            <span
+              className="resize-handle-row"
+              onMouseDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onHeaderRowHeightResizeStart(event.clientY);
+              }}
+            />
           </div>
         ))}
       </div>
 
-      <div className="grid-body" ref={parentRef}>
+      <div className="grid-body" ref={parentRef} onScroll={handleBodyScroll}>
         <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: "relative" }}>
           {rowVirtualizer.getVirtualItems().map((virtualRow) => {
             const rowIndex = getRowIndex(virtualRow.index);
@@ -135,6 +161,14 @@ export default function GridView({
                   }}
                 >
                   {rowIndex + 1}
+                  <span
+                    className="resize-handle"
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onRowHeaderResizeStart(event.clientX);
+                    }}
+                  />
                   <span
                     className="resize-handle-row"
                     onMouseDown={(event) => {

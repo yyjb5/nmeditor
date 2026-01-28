@@ -12,9 +12,13 @@ export type GridViewProps = {
   isRowLoaded: (rowIndex: number) => boolean;
   getRowIndex: (virtualIndex: number) => number | null;
   onColumnResizeStart: (index: number, clientX: number) => void;
+  onColumnResizeStartAll?: (clientX: number) => void;
   onRowHeaderResizeStart: (clientX: number) => void;
   onRowHeightResizeStartAll: (clientY: number) => void;
   onRowHeightResizeStartRow: (rowIndex: number, clientY: number) => void;
+  onHeaderRowHeightResizeStart: (clientY: number) => void;
+  rowHeight: number;
+  headerHeight: number;
   getRowHeight: (rowIndex: number) => number;
   parentRef: RefObject<HTMLDivElement | null>;
   rowVirtualizer: Virtualizer<HTMLDivElement, Element>;
