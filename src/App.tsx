@@ -37,6 +37,18 @@ function App() {
   const [windowStart, setWindowStart] = useState(0);
   const [windowLoading, setWindowLoading] = useState(false);
   const [windowSize, setWindowSize] = useState(400);
+  const [columnWidths, setColumnWidths] = useState<number[]>([]);
+  const [rowHeaderWidth, setRowHeaderWidth] = useState(52);
+  const [rowHeight, setRowHeight] = useState(20);
+  const [rowHeightOverrides, setRowHeightOverrides] = useState<Record<number, number>>({});
+  const [autoFitColumns, setAutoFitColumns] = useState(false);
+  const resizeStateRef = useRef<
+    | { type: "col"; index: number; startX: number; startWidth: number }
+    | { type: "row"; startX: number; startWidth: number }
+    | { type: "rowHeightAll"; startY: number; startHeight: number }
+    | { type: "rowHeightRow"; rowIndex: number; startY: number; startHeight: number }
+    | null
+  >(null);
   const [patches, setPatches] = useState<Record<string, string>>({});
   const [undoStack, setUndoStack] = useState<PatchOp[]>([]);
   const [redoStack, setRedoStack] = useState<PatchOp[]>([]);
@@ -113,7 +125,78 @@ function App() {
     return Math.max(headers.length, rowMax);
   }, [headers.length, rows]);
 
-  const selectionColumnCount = Math.max(dataColumnCount, 3);
+  const columnCount = Math.max(dataColumnCount, 3);
+  const selectionColumnCount = columnCount;
+
+  useEffect(() => {
+    setColumnWidths((current) => {
+      const next = [...current];
+      for (let i = next.length; i < columnCount; i += 1) {
+        next.push(140);
+      }
+      if (next.length > columnCount) {
+        next.length = columnCount;
+      }
+      return next;
+    });
+  }, [columnCount]);
+
+  const layoutStorageKey = useMemo(() => {
+    const path = preview?.path ?? activePath;
+    if (!path) return "nmeditor.grid.layout.default";
+    return `nmeditor.grid.layout.${path}`;
+  }, [preview?.path, activePath]);
+
+  useEffect(() => {
+    const raw = window.localStorage.getItem(layoutStorageKey);
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as {
+        columnWidths?: number[];
+        rowHeaderWidth?: number;
+        rowHeight?: number;
+        rowHeightOverrides?: Record<string, number>;
+        autoFitColumns?: boolean;
+      };
+      if (Array.isArray(parsed.columnWidths)) {
+        setColumnWidths(parsed.columnWidths.map((value) => Math.max(60, Number(value) || 140)));
+      }
+      if (typeof parsed.rowHeaderWidth === "number") {
+        setRowHeaderWidth(Math.max(36, parsed.rowHeaderWidth));
+      }
+      if (typeof parsed.rowHeight === "number") {
+        setRowHeight(Math.max(18, Math.min(300, parsed.rowHeight)));
+      }
+      if (parsed.rowHeightOverrides && typeof parsed.rowHeightOverrides === "object") {
+        const next: Record<number, number> = {};
+        Object.entries(parsed.rowHeightOverrides).forEach(([key, value]) => {
+          const index = Number.parseInt(key, 10);
+          if (Number.isNaN(index)) return;
+          const height = Math.max(18, Math.min(300, Number(value)));
+          next[index] = height;
+        });
+        setRowHeightOverrides(next);
+      }
+      if (typeof parsed.autoFitColumns === "boolean") {
+        setAutoFitColumns(parsed.autoFitColumns);
+      }
+    } catch {
+      // ignore malformed storage
+    }
+  }, [layoutStorageKey]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      layoutStorageKey,
+      JSON.stringify({
+        columnWidths,
+        rowHeaderWidth,
+        rowHeight,
+        rowHeightOverrides,
+        autoFitColumns,
+      }),
+    );
+  }, [columnWidths, rowHeaderWidth, rowHeight, rowHeightOverrides, autoFitColumns, layoutStorageKey]);
 
   const {
     selectionMode,
@@ -398,17 +481,50 @@ function App() {
     [rows.length, windowStart],
   );
 
-  const gridTemplateColumns = useMemo(
-    () => `48px repeat(${selectionColumnCount}, minmax(120px, 1fr))`,
-    [selectionColumnCount],
+  const getRowHeight = useCallback(
+    (rowIndex: number) => rowHeightOverrides[rowIndex] ?? rowHeight,
+    [rowHeightOverrides, rowHeight],
   );
+
+  const gridTemplateColumns = useMemo(() => {
+    const widths = columnWidths.length
+      ? columnWidths
+      : new Array(selectionColumnCount).fill(140);
+    return `${rowHeaderWidth}px ${widths.map((width) => `${width}px`).join(" ")}`;
+  }, [columnWidths, rowHeaderWidth, selectionColumnCount]);
+
+  const computeAutoFit = useCallback(() => {
+    const widths = new Array(selectionColumnCount).fill(80);
+    const headerLabels = headers.length ? headers : new Array(selectionColumnCount).fill("");
+    headerLabels.forEach((label, idx) => {
+      widths[idx] = Math.max(widths[idx], label.length * 8 + 24);
+    });
+    rows.forEach((_, rowOffset) => {
+      const rowIndex = windowStart + rowOffset;
+      for (let col = 0; col < selectionColumnCount; col += 1) {
+        const value = getCellValue(rowIndex, col);
+        widths[col] = Math.max(widths[col], value.length * 8 + 24);
+      }
+    });
+    const clamped = widths.map((width) => Math.min(Math.max(width, 80), 600));
+    setColumnWidths(clamped);
+  }, [selectionColumnCount, headers, rows, windowStart, getCellValue]);
+
+  useEffect(() => {
+    if (!autoFitColumns) return;
+    computeAutoFit();
+  }, [autoFitColumns, computeAutoFit]);
 
   const parentRef = useRef<HTMLDivElement | null>(null);
 
   const rowVirtualizer = useVirtualizer({
     count: totalRowCount,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 32,
+    estimateSize: (index) => {
+      const rowIndex = getRowIndex(index);
+      if (rowIndex === null) return rowHeight;
+      return getRowHeight(rowIndex);
+    },
     overscan: 12,
     onChange: (instance) => {
       if (fileMode !== "csv" || hasSortFilter) return;
@@ -432,6 +548,10 @@ function App() {
       }
     },
   });
+
+  useEffect(() => {
+    rowVirtualizer.measure();
+  }, [rowHeight, rowHeightOverrides, rowVirtualizer]);
 
   const inferType = useCallback(
     (values: string[]) => {
@@ -478,7 +598,75 @@ function App() {
     setTotalRows(null);
     setWindowStart(0);
     setWindowSize(400);
+    setRowHeightOverrides({});
   }, [clearSelection, resetFileOps, resetOps]);
+
+  const startColumnResize = (index: number, clientX: number) => {
+    const startWidth = columnWidths[index] ?? 140;
+    resizeStateRef.current = { type: "col", index, startX: clientX, startWidth };
+  };
+
+  const startRowHeaderResize = (clientX: number) => {
+    resizeStateRef.current = { type: "row", startX: clientX, startWidth: rowHeaderWidth };
+  };
+
+  const startRowHeightResizeAll = (clientY: number) => {
+    resizeStateRef.current = { type: "rowHeightAll", startY: clientY, startHeight: rowHeight };
+  };
+
+  const startRowHeightResizeRow = (rowIndex: number, clientY: number) => {
+    const startHeight = rowHeightOverrides[rowIndex] ?? rowHeight;
+    resizeStateRef.current = {
+      type: "rowHeightRow",
+      rowIndex,
+      startY: clientY,
+      startHeight,
+    };
+  };
+
+  useEffect(() => {
+    const handleMove = (event: MouseEvent) => {
+      const state = resizeStateRef.current;
+      if (!state) return;
+      if (state.type === "col") {
+        const delta = event.clientX - state.startX;
+        const nextWidth = Math.max(60, state.startWidth + delta);
+        setColumnWidths((current) => {
+          const next = [...current];
+          next[state.index] = nextWidth;
+          return next;
+        });
+      } else if (state.type === "row") {
+        const delta = event.clientX - state.startX;
+        const nextWidth = Math.max(36, state.startWidth + delta);
+        setRowHeaderWidth(nextWidth);
+      } else if (state.type === "rowHeightAll") {
+        const delta = event.clientY - state.startY;
+        const nextHeight = Math.max(18, Math.min(300, state.startHeight + delta));
+        setRowHeight(nextHeight);
+        setRowHeightOverrides({});
+      } else {
+        const delta = event.clientY - state.startY;
+        const nextHeight = Math.max(18, Math.min(300, state.startHeight + delta));
+        setRowHeightOverrides((current) => ({
+          ...current,
+          [state.rowIndex]: nextHeight,
+        }));
+      }
+    };
+
+    const handleUp = () => {
+      if (!resizeStateRef.current) return;
+      resizeStateRef.current = null;
+    };
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, [rowHeaderWidth]);
 
   const refreshTotalRows = useCallback(
     async (path: string, delimiterValue?: string) => {
@@ -881,6 +1069,9 @@ function App() {
                 onDelimiterChange={setDelimiter}
                 onApplyDelimiter={handleApplyDelimiter}
                 onLoadMore={loadNextWindow}
+                autoFitEnabled={autoFitColumns}
+                onToggleAutoFit={setAutoFitColumns}
+                onAutoFitNow={computeAutoFit}
                 onUndo={undo}
                 onRedo={redo}
                 onFindReplaceLoaded={applyFindReplace}
@@ -992,6 +1183,11 @@ function App() {
             gridTemplateColumns={gridTemplateColumns}
             isRowLoaded={isRowLoaded}
             getRowIndex={getRowIndex}
+            onColumnResizeStart={startColumnResize}
+            onRowHeaderResizeStart={startRowHeaderResize}
+            onRowHeightResizeStartAll={startRowHeightResizeAll}
+            onRowHeightResizeStartRow={startRowHeightResizeRow}
+            getRowHeight={getRowHeight}
             parentRef={parentRef}
             rowVirtualizer={rowVirtualizer}
             editingCell={editingCell}

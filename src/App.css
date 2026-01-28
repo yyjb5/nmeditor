@@ -14,11 +14,10 @@ body {
 }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding-bottom: 36px;
 }
 .menu-item {
   position: relative;
@@ -160,6 +159,7 @@ select:hover {
   gap: 8px;
   border: 1px solid #d9dde3;
   flex: 1;
+  min-height: 0;
 }
 
 .text-toolbar {

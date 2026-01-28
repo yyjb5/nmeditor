@@ -14,6 +14,9 @@ export default function Quickbar({
   onDelimiterChange,
   onApplyDelimiter,
   onLoadMore,
+  autoFitEnabled,
+  onToggleAutoFit,
+  onAutoFitNow,
   onUndo,
   onRedo,
   onFindReplaceLoaded,
@@ -62,6 +65,17 @@ export default function Quickbar({
           : eof
             ? t("All rows loaded", "已加载全部")
             : t("Load more", "加载更多")}
+      </button>
+      <label className="field checkbox">
+        <span>{t("Auto-fit", "自适应")}</span>
+        <input
+          type="checkbox"
+          checked={autoFitEnabled}
+          onChange={(e) => onToggleAutoFit(e.target.checked)}
+        />
+      </label>
+      <button onClick={onAutoFitNow} disabled={!hasPreview || loading}>
+        {t("Auto-fit now", "立即自适应")}
       </button>
       <button onClick={onUndo} disabled={!canUndo}>
         {t("Undo", "撤销")}

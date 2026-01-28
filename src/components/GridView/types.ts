@@ -11,6 +11,11 @@ export type GridViewProps = {
   gridTemplateColumns: string;
   isRowLoaded: (rowIndex: number) => boolean;
   getRowIndex: (virtualIndex: number) => number | null;
+  onColumnResizeStart: (index: number, clientX: number) => void;
+  onRowHeaderResizeStart: (clientX: number) => void;
+  onRowHeightResizeStartAll: (clientY: number) => void;
+  onRowHeightResizeStartRow: (rowIndex: number, clientY: number) => void;
+  getRowHeight: (rowIndex: number) => number;
   parentRef: RefObject<HTMLDivElement | null>;
   rowVirtualizer: Virtualizer<HTMLDivElement, Element>;
   editingCell: EditingCell;

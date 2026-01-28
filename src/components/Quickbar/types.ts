@@ -13,6 +13,9 @@ export type QuickbarProps = {
   onDelimiterChange: (value: string) => void;
   onApplyDelimiter: () => void;
   onLoadMore: () => void;
+  autoFitEnabled: boolean;
+  onToggleAutoFit: (value: boolean) => void;
+  onAutoFitNow: () => void;
   onUndo: () => void;
   onRedo: () => void;
   onFindReplaceLoaded: () => void;

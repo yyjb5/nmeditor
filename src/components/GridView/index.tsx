@@ -6,6 +6,11 @@ export default function GridView({
   gridTemplateColumns,
   isRowLoaded,
   getRowIndex,
+  onColumnResizeStart,
+  onRowHeaderResizeStart,
+  onRowHeightResizeStartAll,
+  onRowHeightResizeStartRow,
+  getRowHeight,
   parentRef,
   rowVirtualizer,
   editingCell,
@@ -42,6 +47,22 @@ export default function GridView({
           title={t("Clear selection", "清除选择")}
         >
           #
+          <span
+            className="resize-handle"
+            onMouseDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onRowHeaderResizeStart(event.clientX);
+            }}
+          />
+          <span
+            className="resize-handle-row"
+            onMouseDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onRowHeightResizeStartAll(event.clientY);
+            }}
+          />
         </div>
         {columns.map((col, idx) => (
           <div
@@ -62,6 +83,14 @@ export default function GridView({
             }}
           >
             {col}
+            <span
+              className="resize-handle"
+              onMouseDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onColumnResizeStart(idx, event.clientX);
+              }}
+            />
           </div>
         ))}
       </div>
@@ -78,9 +107,15 @@ export default function GridView({
               <div
                 key={virtualRow.key}
                 className="grid-row"
+                ref={rowVirtualizer.measureElement}
                 style={{
                   transform: `translateY(${virtualRow.start}px)`,
                   gridTemplateColumns,
+                  height: `${getRowHeight(rowIndex)}px`,
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: "100%",
                 }}
               >
                 <div
@@ -100,6 +135,14 @@ export default function GridView({
                   }}
                 >
                   {rowIndex + 1}
+                  <span
+                    className="resize-handle-row"
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onRowHeightResizeStartRow(rowIndex, event.clientY);
+                    }}
+                  />
                 </div>
                 {(headers.length ? headers : new Array(3).fill("")).map((_, colIdx) => {
                   const isEditing = editingCell?.row === rowIndex && editingCell?.col === colIdx;
@@ -127,6 +170,22 @@ export default function GridView({
                         updateSelection({ row: rowIndex, col: colIdx }, "cell", { shift: true, ctrl: false });
                       }}
                     >
+                      <span
+                        className="resize-handle"
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          onColumnResizeStart(colIdx, event.clientX);
+                        }}
+                      />
+                      <span
+                        className="resize-handle-row"
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          onRowHeightResizeStartRow(rowIndex, event.clientY);
+                        }}
+                      />
                       {isEditing ? (
                         <input
                           value={editingCell?.value ?? ""}

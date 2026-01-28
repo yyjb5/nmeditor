@@ -3,6 +3,10 @@
   border-radius: 6px;
   overflow: hidden;
   background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 .grid-header {
@@ -13,7 +17,8 @@
 }
 
 .grid-body {
-  height: calc(70vh - 140px);
+  flex: 1;
+  min-height: 0;
   overflow: auto;
   position: relative;
   background: #ffffff;
@@ -23,6 +28,8 @@
   display: grid;
   border-bottom: 1px solid #e5e7eb;
   background: #ffffff;
+  align-items: stretch;
+  box-sizing: border-box;
 }
 
 .grid-row:nth-child(even) {
@@ -30,12 +37,18 @@
 }
 
 .cell {
-  padding: 6px 8px;
-  font-size: 13px;
+  padding: 4px 6px;
+  font-size: 12px;
+  line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   border-right: 1px solid #e5e7eb;
+  position: relative;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
 }
 
 .cell.edited {
@@ -51,8 +64,9 @@
   width: 100%;
   height: 100%;
   border: none;
-  padding: 6px 8px;
-  font-size: 13px;
+  padding: 4px 6px;
+  font-size: 12px;
+  line-height: 1.2;
   font-family: inherit;
   background: #ffffff;
   color: #111827;
@@ -77,4 +91,24 @@
 
 .cell.selected {
   background: #e0f2fe;
+}
+
+.resize-handle {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+}
+
+.resize-handle-row {
+  position: absolute;
+  left: 0;
+  bottom: -2px;
+  width: 100%;
+  height: 6px;
+  cursor: row-resize;
+  z-index: 2;
 }
