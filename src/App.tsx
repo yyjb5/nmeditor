@@ -34,6 +34,10 @@ function App() {
   const [fileMode, setFileMode] = useState<"none" | "csv" | "text">("none");
   const openDialogActiveRef = useRef(false);
   const [totalRows, setTotalRows] = useState<number | null>(null);
+  const [indexJobId, setIndexJobId] = useState<number | null>(null);
+  const [indexProgress, setIndexProgress] = useState(0);
+  const [indexRunning, setIndexRunning] = useState(false);
+  const [indexCanceled, setIndexCanceled] = useState(false);
   const [windowStart, setWindowStart] = useState(0);
   const [windowLoading, setWindowLoading] = useState(false);
   const [windowSize, setWindowSize] = useState(400);
@@ -516,6 +520,29 @@ function App() {
   }, [autoFitColumns, computeAutoFit]);
 
   const parentRef = useRef<HTMLDivElement | null>(null);
+  const pendingWindowRef = useRef<{
+    start: number;
+    path?: string;
+    delimiter?: string;
+  } | null>(null);
+  const windowLoadingRef = useRef(false);
+  const prefetchRef = useRef<{
+    start: number;
+    rows: string[][];
+    eof: boolean;
+    path: string;
+    delimiter: string;
+  } | null>(null);
+  const prefetchUpRef = useRef<{
+    start: number;
+    rows: string[][];
+    eof: boolean;
+    path: string;
+    delimiter: string;
+  } | null>(null);
+  const prefetchingRef = useRef(false);
+  const prefetchTimerRef = useRef<number | null>(null);
+  const indexPollRef = useRef<number | null>(null);
 
   const rowVirtualizer = useVirtualizer({
     count: totalRowCount,
@@ -528,22 +555,33 @@ function App() {
     overscan: 12,
     onChange: (instance) => {
       if (fileMode !== "csv" || hasSortFilter) return;
-      if (windowLoading) return;
       const items = instance.getVirtualItems();
       if (!items.length) return;
       const first = items[0].index;
       const last = items[items.length - 1].index;
       const maxStart = Math.max(totalRowCount - windowSize, 0);
+      const jumpDistance = Math.abs(first - windowStart);
+
+      if (jumpDistance > windowSize * 1.5) {
+        const targetStart = Math.min(
+          Math.max(first - Math.floor(windowSize * 0.4), 0),
+          maxStart,
+        );
+        if (targetStart !== windowStart) {
+          void requestWindow(targetStart);
+        }
+        return;
+      }
 
       if (last >= windowStart + rows.length - 20 && windowStart < maxStart) {
         const nextStart = Math.min(Math.max(last - Math.floor(windowSize * 0.7), 0), maxStart);
         if (nextStart !== windowStart) {
-          void loadWindow(nextStart);
+          void requestWindow(nextStart);
         }
       } else if (first <= windowStart + 20 && windowStart > 0) {
         const nextStart = Math.max(Math.min(first - Math.floor(windowSize * 0.3), maxStart), 0);
         if (nextStart !== windowStart) {
-          void loadWindow(nextStart);
+          void requestWindow(nextStart);
         }
       }
     },
@@ -599,6 +637,10 @@ function App() {
     setWindowStart(0);
     setWindowSize(400);
     setRowHeightOverrides({});
+    setIndexJobId(null);
+    setIndexRunning(false);
+    setIndexProgress(0);
+    setIndexCanceled(false);
   }, [clearSelection, resetFileOps, resetOps]);
 
   const startColumnResize = (index: number, clientX: number) => {
@@ -668,21 +710,96 @@ function App() {
     };
   }, [rowHeaderWidth]);
 
+  const clearIndexPoll = useCallback(() => {
+    if (indexPollRef.current !== null) {
+      window.clearInterval(indexPollRef.current);
+      indexPollRef.current = null;
+    }
+  }, []);
+
+  const cancelIndexBuild = useCallback(async () => {
+    if (indexJobId === null) return;
+    try {
+      await invoke("cancel_prepare_csv_index", { jobId: indexJobId });
+      setIndexCanceled(true);
+      setIndexRunning(false);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      clearIndexPoll();
+    }
+  }, [indexJobId, clearIndexPoll]);
+
   const refreshTotalRows = useCallback(
     async (path: string, delimiterValue?: string) => {
+      await cancelIndexBuild();
+      setIndexProgress(0);
+      setIndexCanceled(false);
       try {
-        const count = await invoke<number>("count_csv_rows", {
+        const response = await invoke<{
+          job_id: number;
+          done: boolean;
+          total_rows?: number;
+        }>("start_prepare_csv_index", {
           path,
           delimiter: delimiterValue ?? delimiter,
         });
-        setTotalRows(count);
+        if (response.done) {
+          setIndexRunning(false);
+          setIndexJobId(null);
+          setIndexProgress(1);
+          if (response.total_rows !== undefined) {
+            setTotalRows(response.total_rows);
+          }
+          return;
+        }
+        setIndexRunning(true);
+        setIndexJobId(response.job_id);
       } catch (err) {
         setError(String(err));
         setTotalRows(null);
+        setIndexRunning(false);
       }
     },
-    [delimiter],
+    [delimiter, cancelIndexBuild],
   );
+
+  useEffect(() => {
+    if (indexJobId === null || !indexRunning) {
+      clearIndexPoll();
+      return;
+    }
+    clearIndexPoll();
+    indexPollRef.current = window.setInterval(async () => {
+      try {
+        const status = await invoke<{
+          job_id: number;
+          progress: number;
+          done: boolean;
+          canceled: boolean;
+          total_rows?: number;
+        }>("get_prepare_csv_index_status", { jobId: indexJobId });
+        setIndexProgress(status.progress ?? 0);
+        if (status.done) {
+          setIndexRunning(false);
+          setIndexCanceled(status.canceled);
+          setIndexJobId(null);
+          if (status.total_rows !== undefined) {
+            setTotalRows(status.total_rows);
+          }
+          clearIndexPoll();
+        }
+      } catch (err) {
+        setError(String(err));
+        setIndexRunning(false);
+        clearIndexPoll();
+      }
+    }, 350);
+
+    return () => {
+      clearIndexPoll();
+    };
+  }, [indexJobId, indexRunning, clearIndexPoll]);
 
   const estimateWindowSize = useCallback((sampleRows: string[][]) => {
     if (!sampleRows.length) return;
@@ -702,7 +819,17 @@ function App() {
     async (start: number, pathOverride?: string, delimiterOverride?: string) => {
       const path = pathOverride ?? preview?.path ?? activePath;
       if (!path) return;
+      const resolvedDelimiter =
+        delimiterOverride ?? delimiterApplied ?? preview?.delimiter ?? delimiter;
       setWindowLoading(true);
+      windowLoadingRef.current = true;
+      if (
+        prefetchRef.current &&
+        (prefetchRef.current.path !== path || prefetchRef.current.delimiter !== resolvedDelimiter)
+      ) {
+        prefetchRef.current = null;
+        prefetchUpRef.current = null;
+      }
       try {
         const slice = await invoke<{
           rows: string[][];
@@ -711,7 +838,7 @@ function App() {
           eof: boolean;
         }>("read_csv_rows_window", {
           path,
-          delimiter: delimiterOverride ?? delimiterApplied ?? preview?.delimiter ?? delimiter,
+          delimiter: resolvedDelimiter,
           start,
           limit: windowSize,
         });
@@ -719,10 +846,19 @@ function App() {
         setWindowStart(slice.start);
         setEof(slice.eof);
         estimateWindowSize(slice.rows);
+        if (!slice.eof) {
+          const nextStart = slice.start + slice.rows.length;
+          schedulePrefetch(nextStart, path, resolvedDelimiter, "down");
+        }
+        if (slice.start > 0) {
+          const prevStart = Math.max(slice.start - windowSize, 0);
+          schedulePrefetch(prevStart, path, resolvedDelimiter, "up");
+        }
       } catch (err) {
         setError(String(err));
       } finally {
         setWindowLoading(false);
+        windowLoadingRef.current = false;
       }
     },
     [
@@ -737,11 +873,123 @@ function App() {
     ],
   );
 
+  const prefetchWindow = useCallback(
+    async (
+      start: number,
+      path: string,
+      resolvedDelimiter: string,
+      direction: "down" | "up",
+    ) => {
+      if (prefetchingRef.current) return;
+      if (totalRowCount !== null && start >= totalRowCount) return;
+      prefetchingRef.current = true;
+      try {
+        const slice = await invoke<{
+          rows: string[][];
+          start: number;
+          end: number;
+          eof: boolean;
+        }>("read_csv_rows_window", {
+          path,
+          delimiter: resolvedDelimiter,
+          start,
+          limit: windowSize,
+        });
+        const payload = {
+          start: slice.start,
+          rows: slice.rows,
+          eof: slice.eof,
+          path,
+          delimiter: resolvedDelimiter,
+        };
+        if (direction === "down") {
+          prefetchRef.current = payload;
+        } else {
+          prefetchUpRef.current = payload;
+        }
+      } finally {
+        prefetchingRef.current = false;
+      }
+    },
+    [totalRowCount, windowSize],
+  );
+
+  const schedulePrefetch = useCallback(
+    (start: number, path: string, resolvedDelimiter: string, direction: "down" | "up") => {
+      if (prefetchTimerRef.current !== null) {
+        window.clearTimeout(prefetchTimerRef.current);
+        prefetchTimerRef.current = null;
+      }
+      if (windowLoadingRef.current) {
+        prefetchTimerRef.current = window.setTimeout(() => {
+          prefetchTimerRef.current = null;
+          if (!windowLoadingRef.current) {
+            void prefetchWindow(start, path, resolvedDelimiter, direction);
+          }
+        }, 160);
+        return;
+      }
+      void prefetchWindow(start, path, resolvedDelimiter, direction);
+    },
+    [prefetchWindow],
+  );
+
+  const requestWindow = useCallback(
+    async (start: number, pathOverride?: string, delimiterOverride?: string) => {
+      const path = pathOverride ?? preview?.path ?? activePath;
+      if (!path) return;
+      const resolvedDelimiter =
+        delimiterOverride ?? delimiterApplied ?? preview?.delimiter ?? delimiter;
+      const matchCache = (cache: typeof prefetchRef.current) =>
+        cache &&
+        cache.start === start &&
+        cache.path === path &&
+        cache.delimiter === resolvedDelimiter;
+
+      if (matchCache(prefetchRef.current) || matchCache(prefetchUpRef.current)) {
+        const cached = matchCache(prefetchRef.current)
+          ? prefetchRef.current
+          : prefetchUpRef.current;
+        prefetchRef.current = null;
+        prefetchUpRef.current = null;
+        if (!cached) return;
+        setRows(cached.rows);
+        setWindowStart(cached.start);
+        setEof(cached.eof);
+        estimateWindowSize(cached.rows);
+        if (!cached.eof) {
+          const nextStart = cached.start + cached.rows.length;
+          schedulePrefetch(nextStart, path, resolvedDelimiter, "down");
+        }
+        if (cached.start > 0) {
+          const prevStart = Math.max(cached.start - windowSize, 0);
+          schedulePrefetch(prevStart, path, resolvedDelimiter, "up");
+        }
+        return;
+      }
+      if (windowLoadingRef.current) {
+        pendingWindowRef.current = { start, path: pathOverride, delimiter: delimiterOverride };
+        return;
+      }
+
+      await loadWindow(start, pathOverride, delimiterOverride);
+
+      if (pendingWindowRef.current) {
+        const next = pendingWindowRef.current;
+        pendingWindowRef.current = null;
+        if (next.start !== start) {
+          await loadWindow(next.start, next.path, next.delimiter);
+        }
+      }
+    },
+    [activePath, preview, delimiterApplied, delimiter, loadWindow, estimateWindowSize, prefetchWindow],
+  );
+
   const loadNextWindow = useCallback(async () => {
     const nextStart = windowStart + rows.length;
     if (totalRowCount !== null && nextStart >= totalRowCount) return;
-    await loadWindow(nextStart);
-  }, [windowStart, rows.length, totalRowCount, loadWindow]);
+    await requestWindow(nextStart);
+  }, [windowStart, rows.length, totalRowCount, requestWindow]);
 
   const handleOpen = async () => {
     if (openDialogActiveRef.current) return;
@@ -767,7 +1015,7 @@ function App() {
         if (!info) return;
         setFileMode("csv");
         resetSessionState();
-        await loadWindow(0, path, info.delimiter);
+        await requestWindow(0, path, info.delimiter);
         void refreshTotalRows(path, info.delimiter);
         return;
       }
@@ -787,7 +1035,7 @@ function App() {
     const info = await applyDelimiter();
     if (!info) return;
     resetSessionState();
-    await loadWindow(0, info.path, info.delimiter);
+    await requestWindow(0, info.path, info.delimiter);
     void refreshTotalRows(info.path, info.delimiter);
   };
 
@@ -1239,6 +1487,10 @@ function App() {
           patchCount={Object.keys(patches).length}
           macroAppliedCount={macroAppliedCount}
           findAppliedCount={findAppliedCount}
+          indexing={indexRunning}
+          indexProgress={indexProgress}
+          indexCanceled={indexCanceled}
+          onCancelIndex={cancelIndexBuild}
           t={t}
         />
       )}

@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::{BufReader, Read, Write};
+use std::fs::{self, File};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::sync::OnceLock;
 #[cfg(desktop)]
 use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder};
@@ -332,12 +332,280 @@ struct CsvSession {
     eof: bool,
 }
 
+#[derive(Clone)]
+struct CsvIndexEntry {
+    row: usize,
+    byte: u64,
+}
+
+#[derive(Clone)]
+struct CsvIndex {
+    delimiter: u8,
+    stride: usize,
+    data_start: u64,
+    offsets: Vec<CsvIndexEntry>,
+    file_len: u64,
+    modified: u64,
+    total_rows: usize,
+}
+
 struct AppState {
     sessions: Mutex<HashMap<u64, CsvSession>>,
     next_id: AtomicU64,
+    indexes: Arc<Mutex<HashMap<String, CsvIndex>>>,
+    index_jobs: Arc<Mutex<HashMap<u64, IndexJob>>>,
+    next_index_job: AtomicU64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StartIndexResponse {
+    job_id: u64,
+    done: bool,
+    total_rows: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IndexJobStatus {
+    job_id: u64,
+    progress: f32,
+    done: bool,
+    canceled: bool,
+    total_rows: Option<usize>,
+}
+
+struct IndexJob {
+    progress: f32,
+    done: bool,
+    canceled: bool,
+    total_rows: Option<usize>,
+    cancel_flag: Arc<AtomicBool>,
 }
 
 static MENU_EVENT_GUARD: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+const INDEX_STRIDE: usize = 1000;
+
+fn index_key(path: &str, delimiter: u8) -> String {
+    format!("{}::{}", path, delimiter)
+}
+
+fn file_signature(path: &PathBuf) -> Result<(u64, u64), String> {
+    let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs());
+    Ok((metadata.len(), modified))
+}
+
+fn update_index_job(jobs: &Arc<Mutex<HashMap<u64, IndexJob>>>, job_id: u64, update: impl FnOnce(&mut IndexJob)) {
+    if let Ok(mut map) = jobs.lock() {
+        if let Some(job) = map.get_mut(&job_id) {
+            update(job);
+        }
+    }
+}
+
+fn is_job_canceled(jobs: &Arc<Mutex<HashMap<u64, IndexJob>>>, job_id: u64) -> bool {
+    if let Ok(map) = jobs.lock() {
+        if let Some(job) = map.get(&job_id) {
+            return job.cancel_flag.load(Ordering::Relaxed);
+        }
+    }
+    false
+}
+
+#[tauri::command]
+fn start_prepare_csv_index(
+    state: tauri::State<AppState>,
+    path: String,
+    delimiter: Option<String>,
+) -> Result<StartIndexResponse, String> {
+    let path_buf = PathBuf::from(&path);
+
+    let delimiter_byte = if let Some(value) = delimiter.as_deref() {
+        parse_delimiter(value)
+    } else {
+        let mut sample = String::new();
+        let sample_reader = BufReader::new(File::open(&path_buf).map_err(|e| e.to_string())?);
+        sample_reader
+            .take(64 * 1024)
+            .read_to_string(&mut sample)
+            .map_err(|e| e.to_string())?;
+        detect_delimiter(&sample)
+    };
+
+    let signature = file_signature(&path_buf)?;
+    let key = index_key(&path, delimiter_byte);
+    if let Ok(indexes) = state.indexes.lock() {
+        if let Some(existing) = indexes.get(&key) {
+            if existing.file_len == signature.0 && existing.modified == signature.1 {
+                return Ok(StartIndexResponse {
+                    job_id: 0,
+                    done: true,
+                    total_rows: Some(existing.total_rows),
+                });
+            }
+        }
+    }
+
+    let job_id = state.next_index_job.fetch_add(1, Ordering::Relaxed);
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+
+    {
+        let mut jobs = state.index_jobs.lock().map_err(|_| "lock poisoned")?;
+        jobs.insert(
+            job_id,
+            IndexJob {
+                progress: 0.0,
+                done: false,
+                canceled: false,
+                total_rows: None,
+                cancel_flag: cancel_flag.clone(),
+            },
+        );
+    }
+
+    let jobs = state.index_jobs.clone();
+    let indexes = state.indexes.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = (|| -> Result<CsvIndex, String> {
+            let (file_len, modified) = file_signature(&path_buf)?;
+            let mut reader = csv::ReaderBuilder::new()
+                .has_headers(true)
+                .delimiter(delimiter_byte)
+                .from_reader(BufReader::new(File::open(&path_buf).map_err(|e| e.to_string())?));
+
+            let _ = reader.headers().map_err(|e| e.to_string())?;
+            let mut offsets = Vec::new();
+            let mut record = csv::StringRecord::new();
+            let mut row_index = 0usize;
+            let mut last_pos = reader.position().byte();
+            let data_start = last_pos;
+            let mut last_progress = 0.0f32;
+
+            loop {
+                if is_job_canceled(&jobs, job_id) {
+                    return Err("canceled".to_string());
+                }
+                if !reader.read_record(&mut record).map_err(|e| e.to_string())? {
+                    break;
+                }
+                let record_start = last_pos;
+                if row_index % INDEX_STRIDE == 0 {
+                    offsets.push(CsvIndexEntry {
+                        row: row_index,
+                        byte: record_start,
+                    });
+                }
+                row_index += 1;
+                last_pos = reader.position().byte();
+
+                if row_index % INDEX_STRIDE == 0 {
+                    let progress = if file_len > 0 {
+                        (last_pos as f32 / file_len as f32).min(1.0)
+                    } else {
+                        0.0
+                    };
+                    if progress - last_progress >= 0.01 {
+                        last_progress = progress;
+                        update_index_job(&jobs, job_id, |job| {
+                            job.progress = progress;
+                        });
+                    }
+                }
+            }
+
+            Ok(CsvIndex {
+                delimiter: delimiter_byte,
+                stride: INDEX_STRIDE,
+                data_start,
+                offsets,
+                file_len,
+                modified,
+                total_rows: row_index,
+            })
+        })();
+
+        match result {
+            Ok(index) => {
+                if let Ok(mut map) = indexes.lock() {
+                    let key = index_key(&path, delimiter_byte);
+                    map.insert(key, index.clone());
+                }
+                update_index_job(&jobs, job_id, |job| {
+                    job.done = true;
+                    job.progress = 1.0;
+                    job.total_rows = Some(index.total_rows);
+                });
+            }
+            Err(err) => {
+                if err == "canceled" {
+                    update_index_job(&jobs, job_id, |job| {
+                        job.done = true;
+                        job.canceled = true;
+                    });
+                } else {
+                    update_index_job(&jobs, job_id, |job| {
+                        job.done = true;
+                    });
+                }
+            }
+        }
+    });
+
+    Ok(StartIndexResponse {
+        job_id,
+        done: false,
+        total_rows: None,
+    })
+}
+
+#[tauri::command]
+fn get_prepare_csv_index_status(
+    state: tauri::State<AppState>,
+    job_id: u64,
+) -> Result<IndexJobStatus, String> {
+    let jobs = state.index_jobs.lock().map_err(|_| "lock poisoned")?;
+    let job = jobs
+        .get(&job_id)
+        .ok_or_else(|| "job not found".to_string())?;
+    Ok(IndexJobStatus {
+        job_id,
+        progress: job.progress,
+        done: job.done,
+        canceled: job.canceled,
+        total_rows: job.total_rows,
+    })
+}
+
+#[tauri::command]
+fn cancel_prepare_csv_index(
+    state: tauri::State<AppState>,
+    job_id: u64,
+) -> Result<bool, String> {
+    let jobs = state.index_jobs.lock().map_err(|_| "lock poisoned")?;
+    if let Some(job) = jobs.get(&job_id) {
+        job.cancel_flag.store(true, Ordering::Relaxed);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn find_index_base(index: &CsvIndex, start: usize) -> (usize, u64) {
+    let mut base_row = 0usize;
+    let mut base_offset = index.data_start;
+    for entry in &index.offsets {
+        if entry.row > start {
+            break;
+        }
+        base_row = entry.row;
+        base_offset = entry.byte;
+    }
+    (base_row, base_offset)
+}
 
 /// Load the first chunk of a CSV for preview, using a detected or provided delimiter.
 #[tauri::command]
@@ -488,6 +756,7 @@ fn read_csv_rows(
 
 #[tauri::command]
 fn read_csv_rows_window(
+    state: tauri::State<AppState>,
     path: String,
     delimiter: Option<String>,
     start: usize,
@@ -495,17 +764,71 @@ fn read_csv_rows_window(
 ) -> Result<CsvSlice, String> {
     let path_buf = PathBuf::from(&path);
 
-    let mut sample = String::new();
-    let sample_reader = BufReader::new(File::open(&path_buf).map_err(|e| e.to_string())?);
-    sample_reader
-        .take(64 * 1024)
-        .read_to_string(&mut sample)
-        .map_err(|e| e.to_string())?;
+    let delimiter_byte = if let Some(value) = delimiter.as_deref() {
+        parse_delimiter(value)
+    } else {
+        let mut sample = String::new();
+        let sample_reader = BufReader::new(File::open(&path_buf).map_err(|e| e.to_string())?);
+        sample_reader
+            .take(64 * 1024)
+            .read_to_string(&mut sample)
+            .map_err(|e| e.to_string())?;
+        detect_delimiter(&sample)
+    };
 
-    let delimiter_byte = delimiter
-        .as_deref()
-        .map(parse_delimiter)
-        .unwrap_or_else(|| detect_delimiter(&sample));
+    let signature = file_signature(&path_buf)?;
+    let key = index_key(&path, delimiter_byte);
+    let index = {
+        let mut indexes = state.indexes.lock().map_err(|_| "lock poisoned")?;
+        if let Some(candidate) = indexes.get(&key) {
+            if candidate.file_len == signature.0 && candidate.modified == signature.1 {
+                Some(candidate.clone())
+            } else {
+                indexes.remove(&key);
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    if let Some(index) = index {
+        let (base_row, base_offset) = find_index_base(&index, start);
+        let mut file = File::open(&path_buf).map_err(|e| e.to_string())?;
+        file.seek(SeekFrom::Start(base_offset)).map_err(|e| e.to_string())?;
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .delimiter(delimiter_byte)
+            .from_reader(BufReader::new(file));
+
+        let mut record = csv::StringRecord::new();
+        let mut current = base_row;
+        while current < start {
+            if !reader.read_record(&mut record).map_err(|e| e.to_string())? {
+                break;
+            }
+            current += 1;
+        }
+
+        let mut rows = Vec::new();
+        while rows.len() < limit {
+            if !reader.read_record(&mut record).map_err(|e| e.to_string())? {
+                break;
+            }
+            rows.push(record.iter().map(|s| s.to_string()).collect());
+            current += 1;
+        }
+
+        let eof = rows.len() < limit;
+        let end = start + rows.len();
+
+        return Ok(CsvSlice {
+            rows,
+            start,
+            end,
+            eof,
+        });
+    }
 
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
@@ -537,6 +860,7 @@ fn read_csv_rows_window(
         eof,
     })
 }
+
 
 #[tauri::command]
 fn count_csv_rows(path: String, delimiter: Option<String>) -> Result<usize, String> {
@@ -1071,6 +1395,9 @@ pub fn run() {
         .manage(AppState {
             sessions: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            indexes: Arc::new(Mutex::new(HashMap::new())),
+            index_jobs: Arc::new(Mutex::new(HashMap::new())),
+            next_index_job: AtomicU64::new(1),
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1088,6 +1415,9 @@ pub fn run() {
             open_csv_session,
             read_csv_rows,
             read_csv_rows_window,
+            start_prepare_csv_index,
+            get_prepare_csv_index_status,
+            cancel_prepare_csv_index,
             count_csv_rows,
             close_csv_session,
             save_csv_with_patches,
