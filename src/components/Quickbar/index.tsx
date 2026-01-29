@@ -7,20 +7,15 @@ export default function Quickbar({
   delimiterApplied,
   delimiterPresets,
   loading,
-  loadingRows,
-  eof,
   hasPreview,
   onLocaleChange,
   onDelimiterChange,
   onApplyDelimiter,
-  onLoadMore,
   autoFitEnabled,
   onToggleAutoFit,
   onAutoFitNow,
   onUndo,
   onRedo,
-  onFindReplaceLoaded,
-  onMacroLoaded,
   canUndo,
   canRedo,
   t,
@@ -45,10 +40,10 @@ export default function Quickbar({
           <option key={preset.value} value={preset.value}>
             {locale === "zh"
               ? preset.label
-                  .replace("Comma", "逗号")
-                  .replace("Semicolon", "分号")
-                  .replace("Tab", "制表符")
-                  .replace("Pipe", "竖线")
+                .replace("Comma", "逗号")
+                .replace("Semicolon", "分号")
+                .replace("Tab", "制表符")
+                .replace("Pipe", "竖线")
               : preset.label}
           </option>
         ))}
@@ -58,13 +53,6 @@ export default function Quickbar({
         disabled={loading || !hasPreview || delimiterApplied === delimiter}
       >
         {t("Apply delimiter", "应用分隔符")}
-      </button>
-      <button onClick={onLoadMore} disabled={loading || loadingRows || !hasPreview || eof}>
-        {loadingRows
-          ? t("Loading rows...", "正在加载...")
-          : eof
-            ? t("All rows loaded", "已加载全部")
-            : t("Load more", "加载更多")}
       </button>
       <label className="field checkbox">
         <span>{t("Auto-fit", "自适应")}</span>
@@ -82,12 +70,6 @@ export default function Quickbar({
       </button>
       <button onClick={onRedo} disabled={!canRedo}>
         {t("Redo", "重做")}
-      </button>
-      <button onClick={onFindReplaceLoaded} disabled={!hasPreview || loading}>
-        {t("Find/Replace (loaded)", "查找替换(已加载)")}
-      </button>
-      <button onClick={onMacroLoaded} disabled={!hasPreview || loading}>
-        {t("Macro (loaded)", "宏(已加载)")}
       </button>
     </div>
   );

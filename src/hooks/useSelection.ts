@@ -36,6 +36,14 @@ export default function useSelection(rowCount: number, colCount: number) {
     return () => window.removeEventListener("mouseup", handleMouseUp);
   }, [isDraggingSelection]);
 
+  useEffect(() => {
+    // When dimensions change (e.g. filter, load new file), validate or clear selection
+    // Simple strategy: Clear selection to avoid out-of-bounds bugs
+    setSelectionRanges([]);
+    setSelectionAnchor(null);
+    setSelectionMode("cell");
+  }, [rowCount, colCount]);
+
   const buildRange = (anchor: CellPoint, focus: CellPoint, mode: SelectionMode) => {
     if (!rowCount || !colCount) return null;
     const startRow = clamp(anchor.row, 0, rowCount - 1);

@@ -543,7 +543,10 @@ function App() {
     path?: string;
     delimiter?: string;
   } | null>(null);
+
   const windowLoadingRef = useRef(false);
+  const debounceTimerRef = useRef<number | null>(null);
+  const requestIdRef = useRef(0);
   const prefetchRef = useRef<{
     start: number;
     rows: string[][];
@@ -752,7 +755,7 @@ function App() {
       window.removeEventListener("mousemove", handleMove);
       window.removeEventListener("mouseup", handleUp);
     };
-  }, [rowHeaderWidth]);
+  }, []);
 
   const clearIndexPoll = useCallback(() => {
     if (indexPollRef.current !== null) {
@@ -860,9 +863,13 @@ function App() {
   }, []);
 
   const loadWindow = useCallback(
-    async (start: number, pathOverride?: string, delimiterOverride?: string) => {
+    async (start: number, pathOverride?: string, delimiterOverride?: string, reqId?: number) => {
       const path = pathOverride ?? preview?.path ?? activePath;
       if (!path) return;
+
+      const currentReqId = reqId ?? requestIdRef.current;
+      if (currentReqId !== requestIdRef.current) return;
+
       const resolvedDelimiter =
         delimiterOverride ?? delimiterApplied ?? preview?.delimiter ?? delimiter;
       setWindowLoading(true);
@@ -886,6 +893,10 @@ function App() {
           start,
           limit: windowSize,
         });
+
+        // Race condition check: if a newer request started, ignore this result
+        if (requestIdRef.current !== currentReqId) return;
+
         setRows(slice.rows);
         setWindowStart(slice.start);
         setEof(slice.eof);
@@ -899,10 +910,14 @@ function App() {
           schedulePrefetch(prevStart, path, resolvedDelimiter, "up");
         }
       } catch (err) {
-        setError(String(err));
+        if (requestIdRef.current === currentReqId) {
+          setError(String(err));
+        }
       } finally {
-        setWindowLoading(false);
-        windowLoadingRef.current = false;
+        if (requestIdRef.current === currentReqId) {
+          setWindowLoading(false);
+          windowLoadingRef.current = false;
+        }
       }
     },
     [
@@ -994,9 +1009,22 @@ function App() {
         const cached = matchCache(prefetchRef.current)
           ? prefetchRef.current
           : prefetchUpRef.current;
+
+        if (debounceTimerRef.current !== null) {
+          window.clearTimeout(debounceTimerRef.current);
+          debounceTimerRef.current = null;
+          pendingWindowRef.current = null;
+        }
+
         prefetchRef.current = null;
         prefetchUpRef.current = null;
         if (!cached) return;
+
+        // Invalidate current request
+        requestIdRef.current += 1;
+        setWindowLoading(false);
+        windowLoadingRef.current = false;
+
         setRows(cached.rows);
         setWindowStart(cached.start);
         setEof(cached.eof);
@@ -1011,22 +1039,35 @@ function App() {
         }
         return;
       }
-      if (windowLoadingRef.current) {
-        pendingWindowRef.current = { start, path: pathOverride, delimiter: delimiterOverride };
-        return;
+
+      // 2. Pend the request
+      pendingWindowRef.current = { start, path, delimiter: resolvedDelimiter };
+
+      // 3. Clear existing debounce
+      if (debounceTimerRef.current !== null) {
+        window.clearTimeout(debounceTimerRef.current);
       }
 
-      await loadWindow(start, pathOverride, delimiterOverride);
+      // 4. Define runner
+      const fireRequest = async () => {
+        if (windowLoadingRef.current) return;
 
-      if (pendingWindowRef.current) {
-        const next = pendingWindowRef.current;
-        pendingWindowRef.current = null;
-        if (next.start !== start) {
-          await loadWindow(next.start, next.path, next.delimiter);
+        while (pendingWindowRef.current) {
+          const next = pendingWindowRef.current;
+          pendingWindowRef.current = null;
+
+          requestIdRef.current += 1;
+          await loadWindow(next.start, next.path, next.delimiter, requestIdRef.current);
         }
-      }
+      };
+
+      // 5. Set timer
+      debounceTimerRef.current = window.setTimeout(() => {
+        debounceTimerRef.current = null;
+        void fireRequest();
+      }, 80);
     },
-    [activePath, preview, delimiterApplied, delimiter, loadWindow, estimateWindowSize, prefetchWindow],
+    [activePath, preview, delimiterApplied, delimiter, loadWindow, estimateWindowSize, prefetchWindow, windowSize, schedulePrefetch],
   );
 
   const loadNextWindow = useCallback(async () => {
@@ -1354,20 +1395,15 @@ function App() {
                 delimiterApplied={delimiterApplied}
                 delimiterPresets={delimiterPresets}
                 loading={loading}
-                loadingRows={windowLoading}
-                eof={eof}
                 hasPreview={Boolean(preview)}
                 onLocaleChange={setLocale}
                 onDelimiterChange={setDelimiter}
                 onApplyDelimiter={handleApplyDelimiter}
-                onLoadMore={loadNextWindow}
                 autoFitEnabled={autoFitColumns}
                 onToggleAutoFit={setAutoFitColumns}
                 onAutoFitNow={computeAutoFit}
                 onUndo={undo}
                 onRedo={redo}
-                onFindReplaceLoaded={applyFindReplace}
-                onMacroLoaded={runMacro}
                 canUndo={undoStack.length > 0}
                 canRedo={redoStack.length > 0}
                 t={t}
@@ -1518,9 +1554,9 @@ function App() {
           <span>
             {textPath
               ? t(
-                  `Length ${textContent.length} · Lines ${textContent.split(/\r?\n/).length}`,
-                  `长度 ${textContent.length} · 行数 ${textContent.split(/\r?\n/).length}`,
-                )
+                `Length ${textContent.length} · Lines ${textContent.split(/\r?\n/).length}`,
+                `长度 ${textContent.length} · 行数 ${textContent.split(/\r?\n/).length}`,
+              )
               : ""}
           </span>
         </footer>
