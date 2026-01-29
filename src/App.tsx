@@ -14,12 +14,44 @@ import useCsvSession from "./hooks/useCsvSession";
 import useFileOps from "./hooks/useFileOps";
 import useSelection from "./hooks/useSelection";
 import useTextSession from "./hooks/useTextSession";
+import TabBar from "./components/TabBar";
+import type { TabData } from "./components/TabBar/types";
 import "./App.css";
 
 type PatchOp = {
   key: string;
   prev: string | null;
   next: string | null;
+};
+
+type TabFileData = {
+  fileType: "csv" | "text";
+  csvData?: {
+    rows: string[][];
+    headers: string[];
+    delimiter: string;
+    delimiterApplied: string | null;
+    windowStart: number;
+    windowSize: number;
+    eof: boolean;
+    patches: Record<string, string>;
+    undoStack: PatchOp[];
+    redoStack: PatchOp[];
+    columnWidths: number[];
+    rowHeaderWidth: number;
+    rowHeight: number;
+    headerHeightOverride: number | null;
+    rowHeightOverrides: Record<number, number>;
+    autoFitColumns: boolean;
+    totalRows: number | null;
+    preview: { path: string; delimiter: string } | null;
+    activePath: string | null;
+  };
+  textData?: {
+    content: string;
+    dirty: boolean;
+    path: string;
+  };
 };
 
 const delimiterPresets = [
@@ -43,7 +75,7 @@ function App() {
   const [windowSize, setWindowSize] = useState(400);
   const [columnWidths, setColumnWidths] = useState<number[]>([]);
   const [rowHeaderWidth, setRowHeaderWidth] = useState(52);
-  const [rowHeight, setRowHeight] = useState(20);
+  const [rowHeight, setRowHeight] = useState(28);
   const [headerHeightOverride, setHeaderHeightOverride] = useState<number | null>(null);
   const [rowHeightOverrides, setRowHeightOverrides] = useState<Record<number, number>>({});
   const [autoFitColumns, setAutoFitColumns] = useState(false);
@@ -89,6 +121,9 @@ function App() {
     col: number;
     value: string;
   } | null>(null);
+  const [tabs, setTabs] = useState<TabData[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [tabDataMap, setTabDataMap] = useState<Map<string, TabFileData>>(new Map());
 
   const t = useCallback(
     (en: string, zh: string) => (locale === "zh" ? zh : en),
@@ -509,9 +544,15 @@ function App() {
   );
 
   const gridTemplateColumns = useMemo(() => {
-    const widths = columnWidths.length
+    let widths = columnWidths.length
       ? columnWidths
       : new Array(selectionColumnCount).fill(140);
+
+    // Safety check: Pad widths if they don't match column count to prevent wrapping
+    if (widths.length < selectionColumnCount) {
+      widths = [...widths, ...new Array(selectionColumnCount - widths.length).fill(140)];
+    }
+
     return `${rowHeaderWidth}px ${widths.map((width) => `${width}px`).join(" ")}`;
   }, [columnWidths, rowHeaderWidth, selectionColumnCount]);
 
@@ -563,6 +604,25 @@ function App() {
   } | null>(null);
   const prefetchingRef = useRef(false);
   const prefetchTimerRef = useRef<number | null>(null);
+
+  // Track edits and update isDirty flag
+  useEffect(() => {
+    if (!activeTabId) return;
+
+    const currentTab = tabs.find(t => t.id === activeTabId);
+    if (!currentTab) return;
+
+    const isDirty = currentTab.fileType === "csv"
+      ? Object.keys(patches).length > 0
+      : textDirty;
+
+    if (currentTab.isDirty !== isDirty) {
+      setTabs(prev => prev.map(tab =>
+        tab.id === activeTabId ? { ...tab, isDirty } : tab
+      ));
+    }
+  }, [activeTabId, tabs, patches, textDirty]);
+
   const indexPollRef = useRef<number | null>(null);
 
   const rowVirtualizer = useVirtualizer({
@@ -657,6 +717,7 @@ function App() {
     setTotalRows(null);
     setWindowStart(0);
     setWindowSize(400);
+    setRowHeight(28);
     setRowHeightOverrides({});
     setIndexJobId(null);
     setIndexRunning(false);
@@ -1076,6 +1137,159 @@ function App() {
     await requestWindow(nextStart);
   }, [windowStart, rows.length, totalRowCount, requestWindow]);
 
+  // Tab data management helpers
+  const saveCurrentTabData = useCallback((tabId: string, type: "csv" | "text") => {
+    if (type === "csv") {
+      const csvData: TabFileData["csvData"] = {
+        rows,
+        headers,
+        delimiter,
+        delimiterApplied,
+        windowStart,
+        windowSize,
+        eof,
+        patches,
+        undoStack,
+        redoStack,
+        columnWidths,
+        rowHeaderWidth,
+        rowHeight,
+        headerHeightOverride,
+        rowHeightOverrides,
+        autoFitColumns,
+        totalRows: totalRowCount,
+        preview,
+        activePath,
+      };
+      setTabDataMap((prev) => {
+        const next = new Map(prev);
+        next.set(tabId, { fileType: "csv", csvData });
+        return next;
+      });
+    } else if (type === "text") {
+      const textData: TabFileData["textData"] = {
+        content: textContent,
+        dirty: textDirty,
+        path: textPath || "",
+      };
+      setTabDataMap((prev) => {
+        const next = new Map(prev);
+        next.set(tabId, { fileType: "text", textData });
+        return next;
+      });
+    }
+  }, [
+    rows, headers, delimiter, delimiterApplied, windowStart, windowSize, eof,
+    patches, undoStack, redoStack, columnWidths, rowHeaderWidth, rowHeight,
+    headerHeightOverride, rowHeightOverrides, autoFitColumns, totalRowCount,
+    preview, activePath, textContent, textDirty, textPath,
+  ]);
+
+  const loadTabData = useCallback((tabId: string) => {
+    const data = tabDataMap.get(tabId);
+    if (!data) return;
+
+    if (data.fileType === "csv" && data.csvData) {
+      const csv = data.csvData;
+      setFileMode("csv");
+      setRows(csv.rows);
+      setHeaders(csv.headers);
+      setDelimiter(csv.delimiter);
+      setWindowStart(csv.windowStart);
+      setWindowSize(csv.windowSize);
+      setEof(csv.eof);
+      setPatches(csv.patches);
+      setUndoStack(csv.undoStack);
+      setRedoStack(csv.redoStack);
+      setColumnWidths(csv.columnWidths);
+      setRowHeaderWidth(csv.rowHeaderWidth);
+      // Enforce minimum row height of 28 to fix squashed rows regression
+      setRowHeight(Math.max(csv.rowHeight, 28));
+      setHeaderHeightOverride(csv.headerHeightOverride);
+      setRowHeightOverrides(csv.rowHeightOverrides);
+      setAutoFitColumns(csv.autoFitColumns);
+      setTotalRows(csv.totalRows);
+      // Note: preview and activePath are managed by useCsvSession
+    } else if (data.fileType === "text" && data.textData) {
+      const txt = data.textData;
+      setFileMode("text");
+      setTextContent(txt.content);
+      // Note: textDirty and textPath are managed by useTextSession
+    }
+  }, [tabDataMap, setRows, setHeaders, setDelimiter, setEof, setTextContent]);
+
+  // Tab management functions
+  const getBaseName = (path: string) => {
+    const parts = path.split(/[\\/]/);
+    return parts[parts.length - 1] || path;
+  };
+
+  const createTab = useCallback((path: string, fileType: "csv" | "text") => {
+    const tabId = `${Date.now()}-${Math.random()}`;
+    const fileName = getBaseName(path);
+    const newTab: TabData = {
+      id: tabId,
+      path,
+      fileName,
+      isDirty: false,
+      fileType,
+    };
+    setTabs((prev) => [...prev, newTab]);
+    setActiveTabId(tabId);
+    return tabId;
+  }, []);
+
+  const handleTabClick = useCallback((tabId: string) => {
+    if (tabId === activeTabId) return; // Already active
+
+    // Save current tab's data before switching
+    if (activeTabId) {
+      const currentTab = tabs.find(t => t.id === activeTabId);
+      if (currentTab) {
+        saveCurrentTabData(activeTabId, currentTab.fileType);
+      }
+    }
+
+    // Switch to new tab
+    setActiveTabId(tabId);
+
+    // Load new tab's data
+    loadTabData(tabId);
+  }, [activeTabId, tabs, saveCurrentTabData, loadTabData]);
+
+  const handleTabClose = useCallback((tabId: string) => {
+    // TODO: Check if tab isDirty and show confirmation dialog
+
+    setTabs((prev) => {
+      const filtered = prev.filter((tab) => tab.id !== tabId);
+      if (activeTabId === tabId && filtered.length > 0) {
+        const nextTab = filtered[filtered.length - 1];
+        setActiveTabId(nextTab.id);
+        loadTabData(nextTab.id);
+      } else if (filtered.length === 0) {
+        setActiveTabId(null);
+        setFileMode("none");
+        // Clear editor state to prevent stale content
+        setRows([]);
+        setHeaders([]);
+        setPatches({});
+        resetTextSession();
+      }
+      return filtered;
+    });
+
+    // Clean up tab data
+    setTabDataMap((prev) => {
+      const next = new Map(prev);
+      next.delete(tabId);
+      return next;
+    });
+  }, [activeTabId, loadTabData, setRows, setHeaders, setPatches, resetTextSession]);
+
+  const handleNewTab = useCallback(() => {
+    void handleOpen();
+  }, []);
+
   const handleOpen = async () => {
     if (openDialogActiveRef.current) return;
     openDialogActiveRef.current = true;
@@ -1093,6 +1307,14 @@ function App() {
       const path = selected;
       const isCsv = path.toLowerCase().endsWith(".csv");
 
+      // Save current tab's data before opening new file
+      if (activeTabId) {
+        const currentTab = tabs.find(t => t.id === activeTabId);
+        if (currentTab) {
+          saveCurrentTabData(activeTabId, currentTab.fileType);
+        }
+      }
+
       if (isCsv) {
         resetTextSession();
         await closeSession();
@@ -1102,6 +1324,13 @@ function App() {
         resetSessionState();
         await requestWindow(0, path, info.delimiter);
         void refreshTotalRows(path, info.delimiter);
+        const tabId = createTab(path, "csv");
+
+        // Save initial CSV data for this tab
+        // Note: We need to wait for the next render cycle for state to update
+        setTimeout(() => {
+          saveCurrentTabData(tabId, "csv");
+        }, 100);
         return;
       }
 
@@ -1110,6 +1339,12 @@ function App() {
       const opened = await openText(path);
       if (!opened) return;
       setFileMode("text");
+      const tabId = createTab(path, "text");
+
+      // Save initial text data for this tab
+      setTimeout(() => {
+        saveCurrentTabData(tabId, "text");
+      }, 100);
     } finally {
       openDialogActiveRef.current = false;
     }
@@ -1371,6 +1606,14 @@ function App() {
         </section>
       ) : (
         <section className="surface">
+          <TabBar
+            tabs={tabs}
+            activeTabId={activeTabId}
+            onTabClick={handleTabClick}
+            onTabClose={handleTabClose}
+            onNewTab={handleNewTab}
+            t={t}
+          />
           <div className="sticky-bars">
             {showFindBar ? (
               <FindBar
@@ -1411,7 +1654,6 @@ function App() {
             ) : null}
           </div>
           <SurfaceHeader
-            activePath={activePath}
             delimiter={delimiter}
             delimiterApplied={delimiterApplied}
             rowsLength={rows.length}
