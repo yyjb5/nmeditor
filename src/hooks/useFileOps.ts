@@ -328,14 +328,8 @@ export default function useFileOps({
     }
   };
 
-  const saveAs = async () => {
-    if (!preview) return;
-    const target = await saveDialog({
-      defaultPath: preview.path.replace(/\.(csv|txt)$/i, "_edited.csv"),
-      filters: [{ name: "CSV", extensions: ["csv"] }],
-    });
-    if (!target || Array.isArray(target)) return;
-
+  const saveToPath = async (target: string): Promise<boolean> => {
+    if (!preview) return false;
     setError(null);
     setLoading(true);
     try {
@@ -359,9 +353,23 @@ export default function useFileOps({
       });
     } catch (err) {
       setError(String(err));
+      return false;
     } finally {
       setLoading(false);
     }
+    return true;
+  };
+
+  const saveAs = async (): Promise<{ path: string; delimiter: string } | null> => {
+    if (!preview) return null;
+    const target = await saveDialog({
+      defaultPath: preview.path.replace(/\.(csv|txt)$/i, "_edited.csv"),
+      filters: [{ name: "CSV", extensions: ["csv"] }],
+    });
+    if (!target || Array.isArray(target)) return null;
+    const saved = await saveToPath(target);
+    if (!saved) return null;
+    return { path: target, delimiter: dialectDelimiter || preview.delimiter };
   };
 
   return {
@@ -413,6 +421,7 @@ export default function useFileOps({
     runMacroOnFile,
     applyFindReplace,
     runFindReplaceOnFile,
+    saveToPath,
     saveAs,
   };
 }

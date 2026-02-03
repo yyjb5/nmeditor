@@ -313,6 +313,8 @@ export default function useRowColumnOps({
   return {
     rowOps,
     columnOps,
+    setRowOps,
+    setColumnOps,
     resetOps,
     insertRow,
     deleteRow,

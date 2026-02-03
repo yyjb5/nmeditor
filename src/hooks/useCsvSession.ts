@@ -39,7 +39,10 @@ export default function useCsvSession({ setError }: UseCsvSessionParams) {
   const [delimiterApplied, setDelimiterApplied] = useState<string | null>(null);
   const openDialogActiveRef = useRef(false);
 
-  const openCsvPath = async (path: string): Promise<CsvSessionInfo | null> => {
+  const openCsvPath = async (
+    path: string,
+    delimiterOverride?: string,
+  ): Promise<CsvSessionInfo | null> => {
     if (openDialogActiveRef.current) return null;
     openDialogActiveRef.current = true;
     setError(null);
@@ -51,7 +54,7 @@ export default function useCsvSession({ setError }: UseCsvSessionParams) {
 
       const info = await invoke<CsvSessionInfo>("open_csv_session", {
         path,
-        delimiter,
+        delimiter: delimiterOverride ?? delimiter,
       });
       setSessionId(info.session_id);
       setHeaders(info.headers);

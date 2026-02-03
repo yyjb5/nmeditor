@@ -95,6 +95,9 @@ fn build_app_menu<R: tauri::Runtime, M: Manager<R>>(
     let file_open = MenuItemBuilder::with_id("file_open", if zh { "打开..." } else { "Open..." })
         .accelerator("CmdOrCtrl+O")
         .build(manager)?;
+    let file_save = MenuItemBuilder::with_id("file_save", if zh { "保存" } else { "Save" })
+        .accelerator("CmdOrCtrl+S")
+        .build(manager)?;
     let file_save_as = MenuItemBuilder::with_id("file_save_as", if zh { "另存为..." } else { "Save As..." })
         .accelerator("CmdOrCtrl+Shift+S")
         .build(manager)?;
@@ -174,6 +177,7 @@ fn build_app_menu<R: tauri::Runtime, M: Manager<R>>(
 
     let file_menu = SubmenuBuilder::new(manager, if zh { "文件" } else { "File" })
         .item(&file_open)
+        .item(&file_save)
         .item(&file_save_as)
         .separator()
         .item(&file_macro)
@@ -999,6 +1003,13 @@ fn save_csv_with_patches(
             .insert(patch.col, patch.value);
     }
 
+    let needs_replace = target_path == path;
+    let write_target = if needs_replace {
+        format!("{}.tmp", path)
+    } else {
+        target_path.clone()
+    };
+
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .delimiter(delimiter_byte)
@@ -1017,7 +1028,7 @@ fn save_csv_with_patches(
         .terminator(eol_bytes)
         .quote(quote_byte)
         .escape(escape_byte)
-        .from_path(&target_path)
+        .from_path(&write_target)
         .map_err(|e| e.to_string())?;
 
     writer.write_record(&headers).map_err(|e| e.to_string())?;
@@ -1097,12 +1108,21 @@ fn save_csv_with_patches(
     writer.flush().map_err(|e| e.to_string())?;
 
     if use_utf16 {
-        rewrite_as_utf16le(&target_path, bom.unwrap_or(false))?;
-        return Ok(target_path);
+        rewrite_as_utf16le(&write_target, bom.unwrap_or(false))?;
+    } else {
+        rewrite_with_utf8_bom(&write_target, bom.unwrap_or(false))?;
     }
 
-    rewrite_with_utf8_bom(&target_path, bom.unwrap_or(false))?;
-    Ok(target_path)
+    if needs_replace {
+        let final_path = PathBuf::from(&path);
+        if final_path.exists() {
+            fs::remove_file(&final_path).map_err(|e| e.to_string())?;
+        }
+        fs::rename(&write_target, &final_path).map_err(|e| e.to_string())?;
+        return Ok(path);
+    }
+
+    Ok(write_target)
 }
 
 #[tauri::command]

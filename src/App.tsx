@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { message, open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import {
+  confirm,
+  message,
+  open as openDialog,
+  save as saveDialog,
+} from "@tauri-apps/plugin-dialog";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import FindBar from "./components/FindBar";
 import GridView from "./components/GridView";
@@ -46,6 +51,8 @@ type TabFileData = {
     totalRows: number | null;
     preview: { path: string; delimiter: string } | null;
     activePath: string | null;
+    rowOps: ReturnType<typeof useRowColumnOps>["rowOps"];
+    columnOps: ReturnType<typeof useRowColumnOps>["columnOps"];
   };
   textData?: {
     content: string;
@@ -155,6 +162,9 @@ function App() {
     textDirty,
     textLoading,
     setTextContent,
+    setTextPath,
+    setTextContentState,
+    setTextDirty,
     openText,
     saveTextTo,
     resetTextSession,
@@ -363,6 +373,8 @@ function App() {
   const {
     rowOps,
     columnOps,
+    setRowOps,
+    setColumnOps,
     resetOps,
     insertRow,
     deleteRow,
@@ -440,6 +452,7 @@ function App() {
     runMacroOnFile,
     applyFindReplace,
     runFindReplaceOnFile,
+    saveToPath,
     saveAs,
   } = useFileOps({
     preview,
@@ -454,6 +467,21 @@ function App() {
     setLoading,
     t,
   });
+
+  const getBaseName = useCallback((path: string) => {
+    const parts = path.split(/[\\/]/);
+    return parts[parts.length - 1] || path;
+  }, []);
+
+  const updateActiveTabPath = useCallback((nextPath: string) => {
+    if (!activeTabId) return;
+    const fileName = getBaseName(nextPath);
+    setTabs((prev) =>
+      prev.map((tab) =>
+        tab.id === activeTabId ? { ...tab, path: nextPath, fileName } : tab,
+      ),
+    );
+  }, [activeTabId, getBaseName]);
 
   const addSortRule = () => {
     const column = sortColumnInput.trim();
@@ -612,16 +640,17 @@ function App() {
     const currentTab = tabs.find(t => t.id === activeTabId);
     if (!currentTab) return;
 
-    const isDirty = currentTab.fileType === "csv"
-      ? Object.keys(patches).length > 0
-      : textDirty;
+    const isDirty =
+      currentTab.fileType === "csv"
+        ? Object.keys(patches).length > 0 || rowOps.length > 0 || columnOps.length > 0
+        : textDirty;
 
     if (currentTab.isDirty !== isDirty) {
       setTabs(prev => prev.map(tab =>
         tab.id === activeTabId ? { ...tab, isDirty } : tab
       ));
     }
-  }, [activeTabId, tabs, patches, textDirty]);
+  }, [activeTabId, tabs, patches, textDirty, rowOps, columnOps]);
 
   const indexPollRef = useRef<number | null>(null);
 
@@ -1137,6 +1166,16 @@ function App() {
     await requestWindow(nextStart);
   }, [windowStart, rows.length, totalRowCount, requestWindow]);
 
+  const resetWindowCaches = () => {
+    if (debounceTimerRef.current !== null) {
+      window.clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    pendingWindowRef.current = null;
+    prefetchRef.current = null;
+    prefetchUpRef.current = null;
+  };
+
   // Tab data management helpers
   const saveCurrentTabData = useCallback((tabId: string, type: "csv" | "text") => {
     if (type === "csv") {
@@ -1160,6 +1199,8 @@ function App() {
         totalRows: totalRowCount,
         preview,
         activePath,
+        rowOps,
+        columnOps,
       };
       setTabDataMap((prev) => {
         const next = new Map(prev);
@@ -1182,25 +1223,22 @@ function App() {
     rows, headers, delimiter, delimiterApplied, windowStart, windowSize, eof,
     patches, undoStack, redoStack, columnWidths, rowHeaderWidth, rowHeight,
     headerHeightOverride, rowHeightOverrides, autoFitColumns, totalRowCount,
-    preview, activePath, textContent, textDirty, textPath,
+    preview, activePath, rowOps, columnOps, textContent, textDirty, textPath,
   ]);
 
-  const loadTabData = useCallback((tabId: string) => {
+  const loadTabData = useCallback(async (tabId: string) => {
     const data = tabDataMap.get(tabId);
     if (!data) return;
 
     if (data.fileType === "csv" && data.csvData) {
       const csv = data.csvData;
       setFileMode("csv");
-      setRows(csv.rows);
-      setHeaders(csv.headers);
       setDelimiter(csv.delimiter);
-      setWindowStart(csv.windowStart);
-      setWindowSize(csv.windowSize);
-      setEof(csv.eof);
       setPatches(csv.patches);
       setUndoStack(csv.undoStack);
       setRedoStack(csv.redoStack);
+      setRowOps(csv.rowOps ?? []);
+      setColumnOps(csv.columnOps ?? []);
       setColumnWidths(csv.columnWidths);
       setRowHeaderWidth(csv.rowHeaderWidth);
       // Enforce minimum row height of 28 to fix squashed rows regression
@@ -1209,20 +1247,42 @@ function App() {
       setRowHeightOverrides(csv.rowHeightOverrides);
       setAutoFitColumns(csv.autoFitColumns);
       setTotalRows(csv.totalRows);
-      // Note: preview and activePath are managed by useCsvSession
+      resetWindowCaches();
+      if (csv.activePath) {
+        await closeSession();
+        const delimiterToUse = csv.delimiterApplied ?? csv.delimiter;
+        await openCsvPath(csv.activePath, delimiterToUse);
+        setHeaders(csv.headers);
+        setRows(csv.rows);
+        setWindowStart(csv.windowStart);
+        setWindowSize(csv.windowSize);
+        setEof(csv.eof);
+        await requestWindow(csv.windowStart, csv.activePath, delimiterToUse);
+      }
     } else if (data.fileType === "text" && data.textData) {
       const txt = data.textData;
       setFileMode("text");
-      setTextContent(txt.content);
-      // Note: textDirty and textPath are managed by useTextSession
+      setTextPath(txt.path || null);
+      setTextContentState(txt.content);
+      setTextDirty(txt.dirty);
     }
-  }, [tabDataMap, setRows, setHeaders, setDelimiter, setEof, setTextContent]);
-
-  // Tab management functions
-  const getBaseName = (path: string) => {
-    const parts = path.split(/[\\/]/);
-    return parts[parts.length - 1] || path;
-  };
+  }, [
+    tabDataMap,
+    setRows,
+    setHeaders,
+    setDelimiter,
+    setEof,
+    setTextContent,
+    setTextPath,
+    setTextContentState,
+    setTextDirty,
+    setRowOps,
+    setColumnOps,
+    closeSession,
+    openCsvPath,
+    requestWindow,
+    resetWindowCaches,
+  ]);
 
   const createTab = useCallback((path: string, fileType: "csv" | "text") => {
     const tabId = `${Date.now()}-${Math.random()}`;
@@ -1239,13 +1299,180 @@ function App() {
     return tabId;
   }, []);
 
-  const handleTabClick = useCallback((tabId: string) => {
+  const isTabDirty = useCallback(
+    (tab: TabData | undefined) => {
+      if (!tab) return false;
+      if (tab.id === activeTabId) {
+        return tab.fileType === "csv"
+          ? Object.keys(patches).length > 0 || rowOps.length > 0 || columnOps.length > 0
+          : textDirty;
+      }
+      const cached = tabDataMap.get(tab.id);
+      if (!cached) return tab.isDirty;
+      if (cached.fileType === "csv" && cached.csvData) {
+        return (
+          Object.keys(cached.csvData.patches).length > 0 ||
+          cached.csvData.rowOps.length > 0 ||
+          cached.csvData.columnOps.length > 0
+        );
+      }
+      if (cached.fileType === "text" && cached.textData) {
+        return cached.textData.dirty;
+      }
+      return tab.isDirty;
+    },
+    [activeTabId, columnOps, patches, rowOps, tabDataMap, textDirty],
+  );
+
+  const confirmDiscardForTab = useCallback(
+    async (tab: TabData) => {
+      const discard = await confirm(
+        t(`Discard changes to ${tab.fileName}?`, `放弃对 ${tab.fileName} 的更改？`),
+        { title: t("Unsaved changes", "未保存更改"), kind: "warning" },
+      );
+      return discard;
+    },
+    [t],
+  );
+
+  const saveTextAs = useCallback(async (): Promise<boolean> => {
+    const defaultPath = textPath ?? "untitled.txt";
+    const target = await saveDialog({
+      defaultPath,
+      filters: [{ name: "Text", extensions: ["txt"] }],
+    });
+    if (!target || Array.isArray(target)) return false;
+    const saved = await saveTextTo(target);
+    if (saved) {
+      updateActiveTabPath(target);
+    }
+    return saved;
+  }, [saveTextTo, textPath, updateActiveTabPath]);
+
+  const saveAsCurrent = useCallback(async (): Promise<boolean> => {
+    if (fileMode === "text") {
+      return saveTextAs();
+    }
+    if (fileMode !== "csv") return false;
+    const result = await saveAs();
+    if (!result) return false;
+    updateActiveTabPath(result.path);
+    resetSessionState();
+    await closeSession();
+    const info = await openCsvPath(result.path, result.delimiter);
+    if (!info) return false;
+    setFileMode("csv");
+    await requestWindow(0, info.path, info.delimiter);
+    void refreshTotalRows(info.path, info.delimiter);
+    if (activeTabId) {
+      saveCurrentTabData(activeTabId, "csv");
+    }
+    return true;
+  }, [
+    activeTabId,
+    closeSession,
+    fileMode,
+    openCsvPath,
+    refreshTotalRows,
+    requestWindow,
+    resetSessionState,
+    saveAs,
+    saveCurrentTabData,
+    saveTextAs,
+    updateActiveTabPath,
+  ]);
+
+  const handleApplyDelimiter = async () => {
+    if (fileMode !== "csv") return;
+    const info = await applyDelimiter();
+    if (!info) return;
+    resetSessionState();
+    await requestWindow(0, info.path, info.delimiter);
+    void refreshTotalRows(info.path, info.delimiter);
+  };
+
+  const clearEdits = () => {
+    setPatches({});
+    setUndoStack([]);
+    setRedoStack([]);
+    resetOps();
+    resetFileOps();
+    setEditingCell(null);
+    setError(null);
+  };
+
+  const saveCurrent = useCallback(async (): Promise<boolean> => {
+    if (fileMode === "text") {
+      if (textPath) {
+        return saveTextTo(textPath);
+      }
+      return saveTextAs();
+    }
+    if (fileMode === "csv" && preview?.path) {
+      const saved = await saveToPath(preview.path);
+      if (!saved) return false;
+      setPatches({});
+      setUndoStack([]);
+      setRedoStack([]);
+      resetOps();
+      resetFileOps();
+      setEditingCell(null);
+      await requestWindow(windowStart, preview.path, delimiterApplied ?? delimiter);
+      setTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === activeTabId ? { ...tab, isDirty: false } : tab,
+        ),
+      );
+      if (activeTabId) {
+        saveCurrentTabData(activeTabId, "csv");
+      }
+      return true;
+    }
+    return false;
+  }, [
+    activeTabId,
+    delimiter,
+    delimiterApplied,
+    fileMode,
+    preview?.path,
+    requestWindow,
+    resetFileOps,
+    resetOps,
+    saveCurrentTabData,
+    saveTextAs,
+    saveTextTo,
+    saveToPath,
+    textPath,
+    windowStart,
+  ]);
+
+  const confirmSaveOrDiscard = useCallback(
+    async (tab: TabData) => {
+      if (!isTabDirty(tab)) return true;
+      if (tab.id !== activeTabId) {
+        return confirmDiscardForTab(tab);
+      }
+      const saveChanges = await confirm(
+        t(`Save changes to ${tab.fileName}?`, `保存对 ${tab.fileName} 的更改？`),
+        { title: t("Unsaved changes", "未保存更改"), kind: "warning" },
+      );
+      if (saveChanges) {
+        return saveCurrent();
+      }
+      return confirmDiscardForTab(tab);
+    },
+    [activeTabId, confirmDiscardForTab, isTabDirty, saveCurrent, t],
+  );
+
+  const handleTabClick = useCallback(async (tabId: string) => {
     if (tabId === activeTabId) return; // Already active
 
     // Save current tab's data before switching
     if (activeTabId) {
-      const currentTab = tabs.find(t => t.id === activeTabId);
+      const currentTab = tabs.find((tab) => tab.id === activeTabId);
       if (currentTab) {
+        const ok = await confirmSaveOrDiscard(currentTab);
+        if (!ok) return;
         saveCurrentTabData(activeTabId, currentTab.fileType);
       }
     }
@@ -1254,18 +1481,22 @@ function App() {
     setActiveTabId(tabId);
 
     // Load new tab's data
-    loadTabData(tabId);
-  }, [activeTabId, tabs, saveCurrentTabData, loadTabData]);
+    await loadTabData(tabId);
+  }, [activeTabId, tabs, saveCurrentTabData, loadTabData, confirmSaveOrDiscard]);
 
-  const handleTabClose = useCallback((tabId: string) => {
-    // TODO: Check if tab isDirty and show confirmation dialog
+  const handleTabClose = useCallback(async (tabId: string) => {
+    const tab = tabs.find((item) => item.id === tabId);
+    if (tab) {
+      const ok = await confirmSaveOrDiscard(tab);
+      if (!ok) return;
+    }
 
     setTabs((prev) => {
-      const filtered = prev.filter((tab) => tab.id !== tabId);
+      const filtered = prev.filter((item) => item.id !== tabId);
       if (activeTabId === tabId && filtered.length > 0) {
         const nextTab = filtered[filtered.length - 1];
         setActiveTabId(nextTab.id);
-        loadTabData(nextTab.id);
+        void loadTabData(nextTab.id);
       } else if (filtered.length === 0) {
         setActiveTabId(null);
         setFileMode("none");
@@ -1284,13 +1515,29 @@ function App() {
       next.delete(tabId);
       return next;
     });
-  }, [activeTabId, loadTabData, setRows, setHeaders, setPatches, resetTextSession]);
+  }, [
+    activeTabId,
+    loadTabData,
+    resetTextSession,
+    setHeaders,
+    setPatches,
+    setRows,
+    tabs,
+    confirmSaveOrDiscard,
+  ]);
 
   const handleNewTab = useCallback(() => {
     void handleOpen();
   }, []);
 
   const handleOpen = async () => {
+    if (activeTabId) {
+      const currentTab = tabs.find((tab) => tab.id === activeTabId);
+      if (currentTab) {
+        const ok = await confirmSaveOrDiscard(currentTab);
+        if (!ok) return;
+      }
+    }
     if (openDialogActiveRef.current) return;
     openDialogActiveRef.current = true;
     try {
@@ -1309,7 +1556,7 @@ function App() {
 
       // Save current tab's data before opening new file
       if (activeTabId) {
-        const currentTab = tabs.find(t => t.id === activeTabId);
+        const currentTab = tabs.find((tab) => tab.id === activeTabId);
         if (currentTab) {
           saveCurrentTabData(activeTabId, currentTab.fileType);
         }
@@ -1350,34 +1597,6 @@ function App() {
     }
   };
 
-  const handleApplyDelimiter = async () => {
-    if (fileMode !== "csv") return;
-    const info = await applyDelimiter();
-    if (!info) return;
-    resetSessionState();
-    await requestWindow(0, info.path, info.delimiter);
-    void refreshTotalRows(info.path, info.delimiter);
-  };
-
-  const clearEdits = () => {
-    setPatches({});
-    setUndoStack([]);
-    setRedoStack([]);
-    resetOps();
-    resetFileOps();
-    setEditingCell(null);
-    setError(null);
-  };
-
-  const saveTextAs = async () => {
-    const defaultPath = textPath ?? "untitled.txt";
-    const target = await saveDialog({
-      defaultPath,
-      filters: [{ name: "Text", extensions: ["txt"] }],
-    });
-    if (!target || Array.isArray(target)) return;
-    await saveTextTo(target);
-  };
 
   useEffect(() => {
     window.localStorage.setItem("nmeditor.locale", locale);
@@ -1393,7 +1612,8 @@ function App() {
 
   const menuHandlersRef = useRef({
     handleOpen,
-    saveAs,
+    saveCurrent,
+    saveAsCurrent,
     saveTextAs,
     runMacroOnFile,
     runFindReplaceOnFile,
@@ -1420,7 +1640,8 @@ function App() {
   useEffect(() => {
     menuHandlersRef.current = {
       handleOpen,
-      saveAs,
+      saveCurrent,
+      saveAsCurrent,
       saveTextAs,
       runMacroOnFile,
       runFindReplaceOnFile,
@@ -1445,7 +1666,8 @@ function App() {
     };
   }, [
     handleOpen,
-    saveAs,
+    saveCurrent,
+    saveAsCurrent,
     saveTextAs,
     runMacroOnFile,
     runFindReplaceOnFile,
@@ -1482,11 +1704,10 @@ function App() {
             void handlers.handleOpen();
             break;
           case "file_save_as":
-            if (handlers.fileMode === "text") {
-              void handlers.saveTextAs();
-            } else {
-              void handlers.saveAs();
-            }
+            void handlers.saveAsCurrent();
+            break;
+          case "file_save":
+            void handlers.saveCurrent();
             break;
           case "file_macro":
             if (handlers.fileMode === "csv") {
