@@ -8,7 +8,8 @@ export type RowOp =
 export type ColumnOp =
   | { type: "insert"; index: number; name: string }
   | { type: "delete"; index: number }
-  | { type: "rename"; index: number; name: string };
+  | { type: "rename"; index: number; name: string }
+  | { type: "duplicate"; index: number; from: number; name: string };
 
 export type RowColumnOpsParams = {
   headers: string[];
@@ -16,9 +17,11 @@ export type RowColumnOpsParams = {
   rowIndexInput: string;
   columnIndexInput: string;
   columnNameInput: string;
+  pasteMode: "auto" | "strict" | "delimiter";
   getColumnCount: () => number;
   getCellValue: (row: number, col: number) => string;
-  applyPatch: (row: number, col: number, value: string) => void;
+  applyPatch: (row: number, col: number, value: string) => { key: string; prev: string | null; next: string | null } | undefined;
+  pushUndo: (op: { kind: "bulk"; entries: Array<{ key: string; prev: string | null; next: string | null }> }) => void;
   getCurrentDelimiter: () => string;
   getActiveRange: () => SelectionRange | null;
   clearSelection: () => void;
@@ -36,9 +39,11 @@ export default function useRowColumnOps({
   rowIndexInput,
   columnIndexInput,
   columnNameInput,
+  pasteMode,
   getColumnCount,
   getCellValue,
   applyPatch,
+  pushUndo,
   getCurrentDelimiter,
   getActiveRange,
   clearSelection,
@@ -142,6 +147,11 @@ export default function useRowColumnOps({
           normalized.splice(op.index, 1);
         }
       }
+      if (op.type === "duplicate") {
+        if (op.index >= 0 && op.index < normalized.length) {
+          normalized.splice(op.index, 1);
+        }
+      }
       if (op.type === "delete") {
         if (op.index <= normalized.length) {
           normalized.splice(op.index, 0, "");
@@ -180,10 +190,30 @@ export default function useRowColumnOps({
     insertRowAt(target);
   };
 
+  const insertRowAtIndex = (target: number, values?: string[]) => {
+    if (target < 0) {
+      setError(t("Row index is invalid.", "行索引无效。"));
+      return;
+    }
+    insertRowAt(target, values);
+  };
+
   const deleteRow = () => {
     const target = resolveRowTarget(false);
     if (target === null) {
       setError(t("Select a row to delete.", "请选择要删除的行。"));
+      return;
+    }
+    setRowOps((current) => [...current, { type: "delete", index: target }]);
+    setRows((current) => (target < current.length ? current.filter((_, idx) => idx !== target) : current));
+    shiftPatchesForRowDelete(target);
+    resetTransientEdits();
+    clearSelection();
+  };
+
+  const deleteRowAtIndex = (target: number) => {
+    if (target < 0) {
+      setError(t("Row index is invalid.", "行索引无效。"));
       return;
     }
     setRowOps((current) => [...current, { type: "delete", index: target }]);
@@ -210,6 +240,24 @@ export default function useRowColumnOps({
     shiftPatchesForColInsert(index);
   };
 
+  const duplicateColumnAt = (index: number, from: number, name: string) => {
+    setColumnOps((current) => [...current, { type: "duplicate", index, from, name }]);
+    setHeaders((current) => {
+      const next = [...current];
+      next.splice(index, 0, name);
+      return next;
+    });
+    setRows((current) =>
+      current.map((row) => {
+        const next = [...row];
+        const value = from >= 0 && from < next.length ? next[from] ?? "" : "";
+        next.splice(index, 0, value);
+        return next;
+      }),
+    );
+    shiftPatchesForColInsert(index);
+  };
+
   const insertColumn = () => {
     const index = parseColumnIndex(columnIndexInput, true);
     if (index === null) {
@@ -223,9 +271,50 @@ export default function useRowColumnOps({
     clearSelection();
   };
 
+  const insertColumnAtIndex = (index: number, name?: string) => {
+    if (index < 0) {
+      setError(t("Column index is invalid for insert.", "插入时列索引无效。"));
+      return;
+    }
+    const resolvedName =
+      name?.trim() || t(`Column ${headers.length + 1}`, `列 ${headers.length + 1}`);
+    setError(null);
+    insertColumnAt(index, resolvedName);
+    resetTransientEdits();
+    clearSelection();
+  };
+
+  const duplicateColumnAtIndex = (from: number) => {
+    if (from < 0 || from >= headers.length) {
+      setError(t("Column index is invalid for duplicate.", "复制时列索引无效。"));
+      return;
+    }
+    const index = from + 1;
+    const baseName = headers[from] ?? "";
+    const name = baseName ? `${baseName} copy` : t("Column copy", "列副本");
+    setError(null);
+    duplicateColumnAt(index, from, name);
+    resetTransientEdits();
+    clearSelection();
+  };
+
   const deleteColumn = () => {
     const index = parseColumnIndex(columnIndexInput, false);
     if (index === null) {
+      setError(t("Column index is invalid for delete.", "删除时列索引无效。"));
+      return;
+    }
+    setError(null);
+    setColumnOps((current) => [...current, { type: "delete", index }]);
+    setHeaders((current) => current.filter((_, idx) => idx !== index));
+    setRows((current) => current.map((row) => row.filter((_, idx) => idx !== index)));
+    shiftPatchesForColDelete(index);
+    resetTransientEdits();
+    clearSelection();
+  };
+
+  const deleteColumnAtIndex = (index: number) => {
+    if (index < 0 || index >= headers.length) {
       setError(t("Column index is invalid for delete.", "删除时列索引无效。"));
       return;
     }
@@ -246,6 +335,20 @@ export default function useRowColumnOps({
     }
     const name = columnNameInput.trim();
     if (!name) {
+      setError(t("Column name is required for rename.", "重命名需要列名。"));
+      return;
+    }
+    setError(null);
+    setColumnOps((current) => [...current, { type: "rename", index, name }]);
+    setHeaders((current) => current.map((value, idx) => (idx === index ? name : value)));
+  };
+
+  const renameColumnAtIndex = (index: number, name: string) => {
+    if (index < 0 || index >= headers.length) {
+      setError(t("Column index is invalid for rename.", "重命名时列索引无效。"));
+      return;
+    }
+    if (!name.trim()) {
       setError(t("Column name is required for rename.", "重命名需要列名。"));
       return;
     }
@@ -285,7 +388,67 @@ export default function useRowColumnOps({
       }
       lines.push(values.join(delimiterChar));
     }
-    await navigator.clipboard.writeText(lines.join("\n"));
+    try {
+      await navigator.clipboard.writeText(lines.join("\n"));
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+
+  const parseDelimitedText = (text: string, delimiterChar: string) => {
+    const rows: string[][] = [];
+    let row: string[] = [];
+    let field = "";
+    let inQuotes = false;
+    let i = 0;
+
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === "\"") {
+        if (inQuotes && text[i + 1] === "\"") {
+          field += "\"";
+          i += 2;
+          continue;
+        }
+        inQuotes = !inQuotes;
+        i += 1;
+        continue;
+      }
+
+      if (!inQuotes && ch === delimiterChar) {
+        row.push(field);
+        field = "";
+        i += 1;
+        continue;
+      }
+
+      if (!inQuotes && (ch === "\n" || ch === "\r")) {
+        row.push(field);
+        field = "";
+        rows.push(row);
+        row = [];
+        if (ch === "\r" && text[i + 1] === "\n") i += 2;
+        else i += 1;
+        continue;
+      }
+
+      field += ch;
+      i += 1;
+    }
+
+    row.push(field);
+    rows.push(row);
+
+    while (rows.length > 0 && rows[rows.length - 1].length === 1 && rows[rows.length - 1][0] === "") {
+      rows.pop();
+    }
+
+    return rows;
+  };
+
+  const parseByDelimiter = (text: string, delimiterChar: string) => {
+    const lines = text.split(/\r?\n/).filter((line) => line.length || line === "");
+    return lines.map((line) => line.split(delimiterChar));
   };
 
   const pasteSelection = async () => {
@@ -294,20 +457,38 @@ export default function useRowColumnOps({
       setError(t("Select a start cell to paste.", "请选择起始单元格进行粘贴。"));
       return;
     }
-    const text = await navigator.clipboard.readText();
+    let text = "";
+    try {
+      text = await navigator.clipboard.readText();
+    } catch (err) {
+      setError(String(err));
+      return;
+    }
     if (!text) return;
     const delimiterChar = text.includes("\t") ? "\t" : getCurrentDelimiter();
-    const lines = text.split(/\r?\n/).filter((line) => line.length || line === "");
-    lines.forEach((line, rowOffset) => {
-      const cells = line.split(delimiterChar);
+    const mode = pasteMode;
+    const parsedRows =
+      mode === "strict"
+        ? parseDelimitedText(text, delimiterChar)
+        : mode === "delimiter"
+          ? parseByDelimiter(text, delimiterChar)
+          : text.includes("\"")
+            ? parseDelimitedText(text, delimiterChar)
+            : parseByDelimiter(text, delimiterChar);
+    const bulkEntries: Array<{ key: string; prev: string | null; next: string | null }> = [];
+    parsedRows.forEach((cells, rowOffset) => {
       cells.forEach((value, colOffset) => {
         const targetRow = range.startRow + rowOffset;
         const targetCol = range.startCol + colOffset;
         ensureRowIndex(targetRow);
         ensureColumnIndex(targetCol);
-        applyPatch(targetRow, targetCol, value);
+        const entry = applyPatch(targetRow, targetCol, value);
+        if (entry) bulkEntries.push(entry);
       });
     });
+    if (bulkEntries.length) {
+      pushUndo({ kind: "bulk", entries: bulkEntries });
+    }
   };
 
   return {
@@ -317,10 +498,16 @@ export default function useRowColumnOps({
     setColumnOps,
     resetOps,
     insertRow,
+    insertRowAtIndex,
     deleteRow,
+    deleteRowAtIndex,
     insertColumn,
+    insertColumnAtIndex,
+    duplicateColumnAtIndex,
     deleteColumn,
+    deleteColumnAtIndex,
     renameColumn,
+    renameColumnAtIndex,
     copySelection,
     pasteSelection,
   };

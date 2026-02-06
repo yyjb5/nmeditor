@@ -8,9 +8,13 @@ export type StatusBarProps = {
   patchCount: number;
   macroAppliedCount: number;
   findAppliedCount: number;
+  opStatus: string | null;
   indexing: boolean;
   indexProgress: number;
   indexCanceled: boolean;
+  globalViewLoading: boolean;
   onCancelIndex?: () => void;
+  onBuildIndex?: () => void;
+  canBuildIndex?: boolean;
   t: (en: string, zh: string) => string;
 };

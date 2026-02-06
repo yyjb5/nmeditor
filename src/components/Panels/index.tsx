@@ -1,3 +1,4 @@
+import { useMemo, useState } from "react";
 import "./styles.css";
 import type { MacroOp, PanelsProps } from "./types";
 
@@ -12,14 +13,15 @@ export default function Panels({
   macroFind,
   macroReplace,
   macroText,
+  macroScope,
   macroOutputPath,
   onMacroOpChange,
   onMacroColumnChange,
   onMacroFindChange,
   onMacroReplaceChange,
   onMacroTextChange,
+  onMacroScopeChange,
   onRunMacro,
-  onRunMacroOnFile,
   rowIndexInput,
   columnIndexInput,
   columnNameInput,
@@ -30,6 +32,20 @@ export default function Panels({
   onDeleteRow,
   onCopySelection,
   onPasteSelection,
+  pasteMode,
+  onPasteModeChange,
+  columnSearch,
+  onColumnSearchChange,
+  hiddenCols,
+  onToggleColumnHidden,
+  onShowAllColumns,
+  onHideAllColumns,
+  onMoveColumnUp,
+  onMoveColumnDown,
+  importSkipRows,
+  onImportSkipRowsChange,
+  importFirstRowHeader,
+  onImportFirstRowHeaderChange,
   onInsertColumn,
   onDeleteColumn,
   onRenameColumn,
@@ -62,6 +78,7 @@ export default function Panels({
   onDialectEscapeChange,
   findText,
   replaceText,
+  findScope,
   findColumnInput,
   findStartRow,
   findEndRow,
@@ -70,26 +87,46 @@ export default function Panels({
   findOutputPath,
   onFindTextChange,
   onReplaceTextChange,
+  onFindScopeChange,
   onFindColumnChange,
   onFindStartRowChange,
   onFindEndRowChange,
   onUseRegexChange,
   onMatchCaseChange,
   onApplyFindReplace,
-  onApplyFindReplaceOnFile,
   columnStats,
   fullStats,
   fullStatsLoading,
   onRunFullStats,
   loading,
+  sortFilterActive,
+  sortFilterMemoryLimitText,
+  onSortFilterMemoryLimitTextChange,
+  onSortFilterMemoryLimitCommit,
+  columnSelectOptions,
   hasPreview,
   t,
 }: PanelsProps) {
+  const [showAllColumnsList, setShowAllColumnsList] = useState(false);
+  const columnQuery = columnSearch.trim().toLowerCase();
+  const filteredColumns = useMemo(() => {
+    if (!columnQuery) return columnSelectOptions;
+    return columnSelectOptions.filter(
+      (option) => option.label.toLowerCase().includes(columnQuery) || option.value === columnQuery,
+    );
+  }, [columnQuery, columnSelectOptions]);
+  const columnListLimit = 200;
+  const showColumnLimitHint =
+    !columnQuery && filteredColumns.length > columnListLimit && !showAllColumnsList;
+  const visibleColumns = showAllColumnsList || columnQuery
+    ? filteredColumns
+    : filteredColumns.slice(0, columnListLimit);
+
   return (
     <>
       {showMacroPanel ? (
         <div className="macro-panel">
-          <div className="macro-title">{t("Macro / Batch (loaded rows)", "宏 / 批处理（已加载行）")}</div>
+          <div className="macro-title">{t("Macro / Batch", "宏 / 批处理")}</div>
           <div className="macro-row">
             <label className="field">
               <span>{t("Operation", "操作")}</span>
@@ -105,6 +142,17 @@ export default function Panels({
             <label className="field">
               <span>{t("Column (0-based)", "列（从0开始）")}</span>
               <input value={macroColumn} onChange={(e) => onMacroColumnChange(e.target.value)} placeholder={t("0", "0")} />
+            </label>
+            <label className="field">
+              <span>{t("Scope", "范围")}</span>
+              <select
+                value={macroScope}
+                onChange={(e) => onMacroScopeChange(e.target.value as "loaded" | "file")}
+                data-testid="macro-scope-select"
+              >
+                <option value="loaded">{t("Loaded rows", "已加载行")}</option>
+                <option value="file">{t("Full file", "全文件")}</option>
+              </select>
             </label>
             {macroOp === "replace" ? (
               <>
@@ -124,11 +172,35 @@ export default function Panels({
               </label>
             ) : null}
             <button onClick={onRunMacro} disabled={!hasPreview || loading}>
-              {t("Run on loaded rows", "运行（已加载行）")}
+              {macroScope === "file" ? t("Run on full file", "运行（全文件）") : t("Run on loaded rows", "运行（已加载行）")}
             </button>
-            <button onClick={onRunMacroOnFile} disabled={!hasPreview || loading}>
-              {t("Run on full file", "运行（全文件）")}
-            </button>
+          </div>
+          <div className="macro-row">
+            <label className="field">
+              <span>{t("Import skip rows", "导入跳过行")}</span>
+              <input
+                value={importSkipRows}
+                onChange={(e) => onImportSkipRowsChange(e.target.value)}
+                placeholder={t("0", "0")}
+                inputMode="numeric"
+              />
+            </label>
+            <label className="field checkbox">
+              <span>{t("First row as header", "首行作为列名")}</span>
+              <input
+                type="checkbox"
+                checked={importFirstRowHeader}
+                onChange={(e) => onImportFirstRowHeaderChange(e.target.checked)}
+              />
+            </label>
+            <span className="macro-hint">
+              {t("Applies when opening a new file.", "仅对新打开的文件生效。")}
+            </span>
+          </div>
+          <div className="macro-hint">
+            {macroScope === "file"
+              ? t("Full file runs will export to a new file.", "全文件运行将导出到新文件。")
+              : t("Loaded rows only. Switch scope to full file for all rows.", "仅对已加载行生效。如需全文件请选择全文件。")}
           </div>
           {macroOutputPath ? (
             <div className="macro-output">
@@ -140,16 +212,16 @@ export default function Panels({
 
       {showOpsPanel ? (
         <div className="ops-panel">
-          <div className="macro-title">{t("Column / Sort / Filter", "列 / 排序 / 筛选")}</div>
+          <div className="macro-title">{t("Column / Sort / Filter (full file)", "列 / 排序 / 筛选（全文件）")}</div>
           <div className="macro-row">
             <label className="field">
               <span>{t("Row index", "行索引")}</span>
               <input value={rowIndexInput} onChange={(e) => onRowIndexChange(e.target.value)} placeholder={t("0", "0")} />
             </label>
-            <button onClick={onInsertRow} disabled={loading}>
+            <button onClick={onInsertRow} disabled={loading || sortFilterActive}>
               {t("Insert row", "插入行")}
             </button>
-            <button onClick={onDeleteRow} disabled={loading}>
+            <button onClick={onDeleteRow} disabled={loading || sortFilterActive}>
               {t("Delete row", "删除行")}
             </button>
             <button onClick={onCopySelection} disabled={loading}>
@@ -158,6 +230,80 @@ export default function Panels({
             <button onClick={onPasteSelection} disabled={loading}>
               {t("Paste selection", "粘贴选择")}
             </button>
+            <label className="field">
+              <span>{t("Paste mode", "粘贴模式")}</span>
+              <select value={pasteMode} onChange={(e) => onPasteModeChange(e.target.value as "auto" | "strict" | "delimiter")}>
+                <option value="auto">{t("Auto", "自动")}</option>
+                <option value="strict">{t("Strict CSV", "严格CSV")}</option>
+                <option value="delimiter">{t("Delimiter only", "仅分隔符")}</option>
+              </select>
+            </label>
+          </div>
+          <div className="macro-row">
+            <label className="field">
+              <span>{t("Column search", "列搜索")}</span>
+              <input
+                value={columnSearch}
+                onChange={(e) => onColumnSearchChange(e.target.value)}
+                placeholder={t("Name or index", "名称或索引")}
+              />
+            </label>
+            <button onClick={onShowAllColumns} disabled={!hasPreview}>
+              {t("Show all", "全部显示")}
+            </button>
+            <button onClick={onHideAllColumns} disabled={!hasPreview}>
+              {t("Hide all", "全部隐藏")}
+            </button>
+          </div>
+          <div className="column-list">
+            {visibleColumns.map((option) => {
+                const index = Number.parseInt(option.value, 10);
+                const isHidden = hiddenCols.includes(index);
+                return (
+                  <label key={option.value} className="column-item">
+                    <input
+                      type="checkbox"
+                      checked={!isHidden}
+                      onChange={() => onToggleColumnHidden(index)}
+                    />
+                    <span>{option.label}</span>
+                    <div className="column-actions">
+                      <button type="button" onClick={() => onMoveColumnUp(index)}>
+                        ↑
+                      </button>
+                      <button type="button" onClick={() => onMoveColumnDown(index)}>
+                        ↓
+                      </button>
+                    </div>
+                  </label>
+                );
+              })}
+          </div>
+          {showColumnLimitHint ? (
+            <div className="macro-hint">
+              {t(
+                `Showing first ${columnListLimit} columns. Use search to filter or show all.`,
+                `仅显示前 ${columnListLimit} 列，可搜索过滤或显示全部。`,
+              )}
+              <button
+                type="button"
+                onClick={() => setShowAllColumnsList(true)}
+                style={{ marginLeft: 8 }}
+              >
+                {t("Show all", "显示全部")}
+              </button>
+            </div>
+          ) : null}
+          <div className="shortcuts-panel">
+            <div className="macro-title">{t("Shortcuts", "快捷键")}</div>
+            <div className="shortcut-list">
+              <div><span>Ctrl/Cmd + Z</span><span>{t("Undo", "撤销")}</span></div>
+              <div><span>Ctrl/Cmd + Y</span><span>{t("Redo", "重做")}</span></div>
+              <div><span>Enter</span><span>{t("Edit cell", "编辑单元格")}</span></div>
+              <div><span>Esc</span><span>{t("Cancel edit", "取消编辑")}</span></div>
+              <div><span>Ctrl/Cmd + C</span><span>{t("Copy", "复制")}</span></div>
+              <div><span>Ctrl/Cmd + V</span><span>{t("Paste", "粘贴")}</span></div>
+            </div>
           </div>
           <div className="macro-row">
             <label className="field">
@@ -168,20 +314,50 @@ export default function Panels({
               <span>{t("Column name", "列名")}</span>
               <input value={columnNameInput} onChange={(e) => onColumnNameChange(e.target.value)} placeholder={t("Name", "名称")} />
             </label>
-            <button onClick={onInsertColumn} disabled={!hasPreview || loading}>
+            <button onClick={onInsertColumn} disabled={!hasPreview || loading || sortFilterActive}>
               {t("Insert", "插入")}
             </button>
-            <button onClick={onDeleteColumn} disabled={!hasPreview || loading}>
+            <button onClick={onDeleteColumn} disabled={!hasPreview || loading || sortFilterActive}>
               {t("Delete", "删除")}
             </button>
-            <button onClick={onRenameColumn} disabled={!hasPreview || loading}>
+            <button onClick={onRenameColumn} disabled={!hasPreview || loading || sortFilterActive}>
               {t("Rename", "重命名")}
             </button>
           </div>
           <div className="macro-row">
             <label className="field">
+              <span>{t("Sort/Filter memory limit (MB)", "排序/筛选内存上限 (MB)")}</span>
+              <input
+                inputMode="numeric"
+                value={sortFilterMemoryLimitText}
+                onChange={(e) => onSortFilterMemoryLimitTextChange(e.target.value)}
+                onBlur={() => {
+                  const parsed = Number.parseInt(sortFilterMemoryLimitText, 10);
+                  const clamped = Number.isNaN(parsed)
+                    ? 300
+                    : Math.min(4096, Math.max(50, parsed));
+                  onSortFilterMemoryLimitCommit(clamped);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter") return;
+                  const parsed = Number.parseInt(sortFilterMemoryLimitText, 10);
+                  const clamped = Number.isNaN(parsed)
+                    ? 300
+                    : Math.min(4096, Math.max(50, parsed));
+                  onSortFilterMemoryLimitCommit(clamped);
+                }}
+              />
+            </label>
+            <label className="field">
               <span>{t("Sort column", "排序列")}</span>
-              <input value={sortColumnInput} onChange={(e) => onSortColumnChange(e.target.value)} placeholder={t("0", "0")} />
+              <select value={sortColumnInput} onChange={(e) => onSortColumnChange(e.target.value)}>
+                <option value="">{t("Select column", "选择列")}</option>
+                {columnSelectOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
             </label>
             <label className="field">
               <span>{t("Direction", "方向")}</span>
@@ -198,13 +374,19 @@ export default function Panels({
               <span>{t("Filter text", "筛选文本")}</span>
               <input value={filterText} onChange={(e) => onFilterTextChange(e.target.value)} placeholder={t("contains...", "包含...")} />
             </label>
-            <button onClick={onAddSortRule} disabled={!sortColumnInput}>
+            <button onClick={onAddSortRule} disabled={loading || !sortColumnInput}>
               {t("Add sort", "添加排序")}
             </button>
-            <button onClick={onAddFilterRule} disabled={!filterColumnInput || !filterText}>
+            <button
+              onClick={onAddFilterRule}
+              disabled={loading || !filterColumnInput || !filterText}
+            >
               {t("Add filter", "添加筛选")}
             </button>
-            <button onClick={onClearSortFilter} disabled={!sortRules.length && !filterRules.length}>
+            <button
+              onClick={onClearSortFilter}
+              disabled={loading || (!sortRules.length && !filterRules.length)}
+            >
               {t("Clear", "清除")}
             </button>
           </div>
@@ -271,7 +453,7 @@ export default function Panels({
 
       {showFindPanel ? (
         <div className="find-panel">
-          <div className="macro-title">{t("Find / Replace (loaded rows)", "查找 / 替换（已加载行）")}</div>
+          <div className="macro-title">{t("Find / Replace", "查找 / 替换")}</div>
           <div className="macro-row">
             <label className="field">
               <span>{t("Find", "查找")}</span>
@@ -280,6 +462,17 @@ export default function Panels({
             <label className="field">
               <span>{t("Replace", "替换")}</span>
               <input value={replaceText} onChange={(e) => onReplaceTextChange(e.target.value)} />
+            </label>
+            <label className="field">
+              <span>{t("Scope", "范围")}</span>
+              <select
+                value={findScope}
+                onChange={(e) => onFindScopeChange(e.target.value as "loaded" | "file")}
+                data-testid="find-scope-select"
+              >
+                <option value="loaded">{t("Loaded rows", "已加载行")}</option>
+                <option value="file">{t("Full file", "全文件")}</option>
+              </select>
             </label>
             <label className="field">
               <span>{t("Column (optional)", "列（可选）")}</span>
@@ -302,11 +495,13 @@ export default function Panels({
               <input type="checkbox" checked={matchCase} onChange={(e) => onMatchCaseChange(e.target.checked)} />
             </label>
             <button onClick={onApplyFindReplace} disabled={!hasPreview || loading}>
-              {t("Apply find/replace", "应用查找/替换")}
+              {findScope === "file" ? t("Apply on full file", "应用到全文件") : t("Apply find/replace", "应用查找/替换")}
             </button>
-            <button onClick={onApplyFindReplaceOnFile} disabled={!hasPreview || loading}>
-              {t("Apply on full file", "应用到全文件")}
-            </button>
+          </div>
+          <div className="macro-hint">
+            {findScope === "file"
+              ? t("Full file runs will export to a new file.", "全文件运行将导出到新文件。")
+              : t("Loaded rows only. Switch scope to full file for all rows.", "仅对已加载行生效。如需全文件请选择全文件。")}
           </div>
           {findOutputPath ? (
             <div className="macro-output">

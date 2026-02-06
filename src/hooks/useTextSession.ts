@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
+import { readTextFile, writeFile, writeTextFile } from "@tauri-apps/plugin-fs";
 
 type UseTextSessionParams = {
   setError: (value: string | null) => void;
@@ -10,6 +10,7 @@ export default function useTextSession({ setError }: UseTextSessionParams) {
   const [textContent, setTextContentState] = useState("");
   const [textDirty, setTextDirty] = useState(false);
   const [textLoading, setTextLoading] = useState(false);
+  const [textEncoding, setTextEncoding] = useState<"UTF-8" | "UTF-16LE">("UTF-8");
 
   const setTextContent = (value: string) => {
     setTextContentState(value);
@@ -37,7 +38,17 @@ export default function useTextSession({ setError }: UseTextSessionParams) {
     setError(null);
     setTextLoading(true);
     try {
-      await writeTextFile(path, textContent);
+      if (textEncoding === "UTF-8") {
+        await writeTextFile(path, textContent);
+      } else {
+        const bytes = new Uint8Array(textContent.length * 2);
+        for (let i = 0; i < textContent.length; i += 1) {
+          const code = textContent.charCodeAt(i);
+          bytes[i * 2] = code & 0xff;
+          bytes[i * 2 + 1] = code >> 8;
+        }
+        await writeFile(path, bytes);
+      }
       setTextPath(path);
       setTextDirty(false);
       return true;
@@ -60,10 +71,12 @@ export default function useTextSession({ setError }: UseTextSessionParams) {
     textContent,
     textDirty,
     textLoading,
+    textEncoding,
     setTextContent,
     setTextPath,
     setTextContentState,
     setTextDirty,
+    setTextEncoding,
     openText,
     saveTextTo,
     resetTextSession,

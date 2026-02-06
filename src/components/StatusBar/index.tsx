@@ -11,15 +11,23 @@ export default function StatusBar({
   patchCount,
   macroAppliedCount,
   findAppliedCount,
+  opStatus,
   indexing,
   indexProgress,
   indexCanceled,
+  globalViewLoading,
   onCancelIndex,
+  onBuildIndex,
+  canBuildIndex,
   t,
 }: StatusBarProps) {
   const indexPercent = Math.min(Math.max(Math.round(indexProgress * 100), 0), 100);
-  const statusText = loading
+  const statusText = opStatus
+    ? opStatus
+    : loading
     ? t("Opening file...", "正在打开文件...")
+    : globalViewLoading
+      ? t("Applying sort/filter...", "正在应用排序/筛选...")
     : indexing
       ? t(`Indexing ${indexPercent}%`, `索引中 ${indexPercent}%`)
       : loadingRows
@@ -45,12 +53,26 @@ export default function StatusBar({
               </button>
             ) : null}
           </>
-        ) : hasPreview
-          ? t(
+        ) : hasPreview ? (
+          <>
+            {t(
               `Visible ${visibleCount} · Edits ${patchCount} · Macro ${macroAppliedCount} · Find ${findAppliedCount}`,
               `显示 ${visibleCount} · 编辑 ${patchCount} · 宏 ${macroAppliedCount} · 查找 ${findAppliedCount}`,
-            )
-          : ""}
+            )}
+            {canBuildIndex ? (
+              <span style={{ marginLeft: 12 }}>
+                {t("Partial load", "部分加载")}
+                {onBuildIndex ? (
+                  <button onClick={onBuildIndex} style={{ marginLeft: 8 }}>
+                    {t("Build index", "构建索引")}
+                  </button>
+                ) : null}
+              </span>
+            ) : null}
+          </>
+        ) : (
+          ""
+        )}
       </span>
     </footer>
   );

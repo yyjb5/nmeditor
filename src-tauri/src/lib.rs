@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
@@ -19,6 +20,13 @@ fn parse_delimiter(input: &str) -> u8 {
         b'\t'
     } else {
         input.as_bytes().first().copied().unwrap_or(b',')
+    }
+}
+
+fn delimiter_to_string(delimiter: u8) -> String {
+    match delimiter {
+        b'\t' => "\\t".to_string(),
+        other => String::from_utf8_lossy(&[other]).to_string(),
     }
 }
 
@@ -248,6 +256,7 @@ pub struct CsvSlice {
     pub start: usize,
     pub end: usize,
     pub eof: bool,
+    pub row_indices: Option<Vec<usize>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -283,6 +292,8 @@ pub enum ColumnOp {
     Delete { index: usize },
     #[serde(rename = "rename")]
     Rename { index: usize, name: String },
+    #[serde(rename = "duplicate")]
+    Duplicate { index: usize, from: usize, name: String },
 }
 
 #[derive(Clone)]
@@ -330,6 +341,68 @@ pub struct FindReplaceResult {
     pub applied: usize,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct SortRule {
+    pub column: usize,
+    pub direction: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct FilterRule {
+    pub column: usize,
+    pub value: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct GlobalViewResponse {
+    pub view_id: u64,
+    pub total_rows: usize,
+}
+
+#[derive(Clone)]
+struct SortKeyItem {
+    text: String,
+    num: Option<f64>,
+    desc: bool,
+}
+
+#[derive(Clone)]
+struct SortKey {
+    items: Vec<SortKeyItem>,
+}
+
+impl PartialEq for SortKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == CmpOrdering::Equal
+    }
+}
+
+impl Eq for SortKey {}
+
+impl PartialOrd for SortKey {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SortKey {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        let len = self.items.len().min(other.items.len());
+        for idx in 0..len {
+            let a = &self.items[idx];
+            let b = &other.items[idx];
+            let base = match (a.num, b.num) {
+                (Some(a_num), Some(b_num)) => a_num.partial_cmp(&b_num).unwrap_or(CmpOrdering::Equal),
+                _ => a.text.cmp(&b.text),
+            };
+            if base != CmpOrdering::Equal {
+                return if a.desc { base.reverse() } else { base };
+            }
+        }
+        self.items.len().cmp(&other.items.len())
+    }
+}
+
 struct CsvSession {
     reader: csv::Reader<BufReader<File>>,
     row_index: usize,
@@ -344,8 +417,6 @@ struct CsvIndexEntry {
 
 #[derive(Clone)]
 struct CsvIndex {
-    delimiter: u8,
-    stride: usize,
     data_start: u64,
     offsets: Vec<CsvIndexEntry>,
     file_len: u64,
@@ -353,12 +424,26 @@ struct CsvIndex {
     total_rows: usize,
 }
 
+#[derive(Clone)]
+enum GlobalViewMode {
+    TempFile(String),
+}
+
+#[derive(Clone)]
+struct GlobalView {
+    mode: GlobalViewMode,
+    delimiter: u8,
+    index_key: Option<String>,
+}
+
 struct AppState {
     sessions: Mutex<HashMap<u64, CsvSession>>,
     next_id: AtomicU64,
-    indexes: Arc<Mutex<HashMap<String, CsvIndex>>>,
+    indexes: Arc<Mutex<HashMap<String, Arc<CsvIndex>>>>,
     index_jobs: Arc<Mutex<HashMap<u64, IndexJob>>>,
     next_index_job: AtomicU64,
+    views: Mutex<HashMap<u64, GlobalView>>,
+    next_view_id: AtomicU64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -388,9 +473,40 @@ struct IndexJob {
 static MENU_EVENT_GUARD: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
 const INDEX_STRIDE: usize = 1000;
+const MAX_INDEX_CACHE_ENTRIES: usize = 12;
+const MAX_GLOBAL_VIEW_ENTRIES: usize = 6;
+const MAX_INDEX_JOB_ENTRIES: usize = 64;
 
 fn index_key(path: &str, delimiter: u8) -> String {
     format!("{}::{}", path, delimiter)
+}
+
+fn prune_index_cache(indexes: &mut HashMap<String, Arc<CsvIndex>>) {
+    if indexes.len() <= MAX_INDEX_CACHE_ENTRIES {
+        return;
+    }
+    let remove_count = indexes.len() - MAX_INDEX_CACHE_ENTRIES;
+    let mut keys: Vec<(String, u64)> = indexes
+        .iter()
+        .map(|(key, value)| (key.clone(), value.modified))
+        .collect();
+    keys.sort_by_key(|(_, modified)| *modified);
+    for (key, _) in keys.into_iter().take(remove_count) {
+        indexes.remove(&key);
+    }
+}
+
+fn prune_index_jobs(jobs: &mut HashMap<u64, IndexJob>) {
+    jobs.retain(|_, job| !job.done);
+    if jobs.len() <= MAX_INDEX_JOB_ENTRIES {
+        return;
+    }
+    let mut ids: Vec<u64> = jobs.keys().copied().collect();
+    ids.sort_unstable();
+    let remove_count = jobs.len() - MAX_INDEX_JOB_ENTRIES;
+    for id in ids.into_iter().take(remove_count) {
+        jobs.remove(&id);
+    }
 }
 
 fn file_signature(path: &PathBuf) -> Result<(u64, u64), String> {
@@ -460,6 +576,7 @@ fn start_prepare_csv_index(
 
     {
         let mut jobs = state.index_jobs.lock().map_err(|_| "lock poisoned")?;
+        prune_index_jobs(&mut jobs);
         jobs.insert(
             job_id,
             IndexJob {
@@ -523,8 +640,6 @@ fn start_prepare_csv_index(
             }
 
             Ok(CsvIndex {
-                delimiter: delimiter_byte,
-                stride: INDEX_STRIDE,
                 data_start,
                 offsets,
                 file_len,
@@ -537,7 +652,8 @@ fn start_prepare_csv_index(
             Ok(index) => {
                 if let Ok(mut map) = indexes.lock() {
                     let key = index_key(&path, delimiter_byte);
-                    map.insert(key, index.clone());
+                    map.insert(key, Arc::new(index.clone()));
+                    prune_index_cache(&mut map);
                 }
                 update_index_job(&jobs, job_id, |job| {
                     job.done = true;
@@ -572,16 +688,64 @@ fn get_prepare_csv_index_status(
     state: tauri::State<AppState>,
     job_id: u64,
 ) -> Result<IndexJobStatus, String> {
-    let jobs = state.index_jobs.lock().map_err(|_| "lock poisoned")?;
+    let mut jobs = state.index_jobs.lock().map_err(|_| "lock poisoned")?;
     let job = jobs
         .get(&job_id)
         .ok_or_else(|| "job not found".to_string())?;
-    Ok(IndexJobStatus {
+    let status = IndexJobStatus {
         job_id,
         progress: job.progress,
         done: job.done,
         canceled: job.canceled,
         total_rows: job.total_rows,
+    };
+    if status.done {
+        jobs.remove(&job_id);
+    }
+    Ok(status)
+}
+
+fn build_csv_index_for_file(
+    path: &PathBuf,
+    delimiter_byte: u8,
+    has_headers: bool,
+) -> Result<CsvIndex, String> {
+    let (file_len, modified) = file_signature(path)?;
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(has_headers)
+        .delimiter(delimiter_byte)
+        .from_reader(BufReader::new(File::open(path).map_err(|e| e.to_string())?));
+
+    if has_headers {
+        let _ = reader.headers().map_err(|e| e.to_string())?;
+    }
+    let mut offsets = Vec::new();
+    let mut record = csv::StringRecord::new();
+    let mut row_index = 0usize;
+    let mut last_pos = reader.position().byte();
+    let data_start = last_pos;
+
+    loop {
+        if !reader.read_record(&mut record).map_err(|e| e.to_string())? {
+            break;
+        }
+        let record_start = last_pos;
+        if row_index % INDEX_STRIDE == 0 {
+            offsets.push(CsvIndexEntry {
+                row: row_index,
+                byte: record_start,
+            });
+        }
+        row_index += 1;
+        last_pos = reader.position().byte();
+    }
+
+    Ok(CsvIndex {
+        data_start,
+        offsets,
+        file_len,
+        modified,
+        total_rows: row_index,
     })
 }
 
@@ -730,6 +894,7 @@ fn read_csv_rows(
             start: session.row_index,
             end: session.row_index,
             eof: true,
+            row_indices: None,
         });
     }
 
@@ -755,16 +920,17 @@ fn read_csv_rows(
         start,
         end,
         eof: session.eof,
+        row_indices: None,
     })
 }
 
-#[tauri::command]
-fn read_csv_rows_window(
-    state: tauri::State<AppState>,
+fn read_csv_rows_window_internal(
+    state: &AppState,
     path: String,
     delimiter: Option<String>,
     start: usize,
     limit: usize,
+    has_headers: bool,
 ) -> Result<CsvSlice, String> {
     let path_buf = PathBuf::from(&path);
 
@@ -786,7 +952,7 @@ fn read_csv_rows_window(
         let mut indexes = state.indexes.lock().map_err(|_| "lock poisoned")?;
         if let Some(candidate) = indexes.get(&key) {
             if candidate.file_len == signature.0 && candidate.modified == signature.1 {
-                Some(candidate.clone())
+                Some(Arc::clone(candidate))
             } else {
                 indexes.remove(&key);
                 None
@@ -831,15 +997,18 @@ fn read_csv_rows_window(
             start,
             end,
             eof,
+            row_indices: None,
         });
     }
 
     let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
+        .has_headers(has_headers)
         .delimiter(delimiter_byte)
         .from_reader(BufReader::new(File::open(&path_buf).map_err(|e| e.to_string())?));
 
-    let _ = reader.headers().map_err(|e| e.to_string())?;
+    if has_headers {
+        let _ = reader.headers().map_err(|e| e.to_string())?;
+    }
 
     let mut rows = Vec::new();
     let mut current = 0usize;
@@ -862,7 +1031,19 @@ fn read_csv_rows_window(
         start,
         end,
         eof,
+        row_indices: None,
     })
+}
+
+#[tauri::command]
+fn read_csv_rows_window(
+    state: tauri::State<AppState>,
+    path: String,
+    delimiter: Option<String>,
+    start: usize,
+    limit: usize,
+) -> Result<CsvSlice, String> {
+    read_csv_rows_window_internal(&state, path, delimiter, start, limit, true)
 }
 
 
@@ -947,6 +1128,10 @@ fn apply_column_ops_to_headers(headers: &mut Vec<String>, column_ops: &[ColumnOp
                     headers[*index] = name.clone();
                 }
             }
+            ColumnOp::Duplicate { index, name, .. } => {
+                let idx = (*index).min(headers.len());
+                headers.insert(idx, name.clone());
+            }
         }
     }
 }
@@ -964,8 +1149,362 @@ fn apply_column_ops_to_row(row: &mut Vec<String>, column_ops: &[ColumnOp]) {
                 }
             }
             ColumnOp::Rename { .. } => {}
+            ColumnOp::Duplicate { index, from, .. } => {
+                let idx = (*index).min(row.len());
+                let source = if *from < row.len() { row[*from].clone() } else { String::new() };
+                row.insert(idx, source);
+            }
         }
     }
+}
+
+fn build_patch_map(patches: &[CsvPatch]) -> HashMap<usize, HashMap<usize, String>> {
+    let mut patch_map: HashMap<usize, HashMap<usize, String>> = HashMap::new();
+    for patch in patches {
+        patch_map
+            .entry(patch.row)
+            .or_default()
+            .insert(patch.col, patch.value.clone());
+    }
+    patch_map
+}
+
+fn row_matches_filters(row: &[String], filters: &[FilterRule]) -> bool {
+    for rule in filters {
+        if rule.value.is_empty() {
+            continue;
+        }
+        if rule.column >= row.len() {
+            return false;
+        }
+        if !row[rule.column].contains(&rule.value) {
+            return false;
+        }
+    }
+    true
+}
+
+fn build_sort_key(row: &[String], rules: &[SortRule]) -> SortKey {
+    let mut items = Vec::with_capacity(rules.len());
+    for rule in rules {
+        let value = row.get(rule.column).map(|s| s.as_str()).unwrap_or("");
+        let text = value.to_lowercase();
+        let num = value.parse::<f64>().ok();
+        let desc = rule.direction == "desc";
+        items.push(SortKeyItem { text, num, desc });
+    }
+    SortKey { items }
+}
+
+fn compare_rows(a: &[String], b: &[String], rules: &[SortRule]) -> CmpOrdering {
+    for rule in rules {
+        let a_value = a.get(rule.column).map(|s| s.as_str()).unwrap_or("");
+        let b_value = b.get(rule.column).map(|s| s.as_str()).unwrap_or("");
+
+        let order = match (a_value.parse::<f64>(), b_value.parse::<f64>()) {
+            (Ok(a_num), Ok(b_num)) => a_num
+                .partial_cmp(&b_num)
+                .unwrap_or(CmpOrdering::Equal),
+            _ => a_value.to_lowercase().cmp(&b_value.to_lowercase()),
+        };
+
+        if order != CmpOrdering::Equal {
+            return if rule.direction == "desc" {
+                order.reverse()
+            } else {
+                order
+            };
+        }
+    }
+    CmpOrdering::Equal
+}
+
+fn stream_rows_with_ops(
+    path: &PathBuf,
+    delimiter_byte: u8,
+    row_ops: &[RowOp],
+    column_ops: &[ColumnOp],
+    patch_map: &HashMap<usize, HashMap<usize, String>>,
+    clear_rows: &HashSet<usize>,
+    clear_cols: &HashSet<usize>,
+    mut on_row: impl FnMut(usize, Vec<String>) -> Result<(), String>,
+) -> Result<Vec<String>, String> {
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .delimiter(delimiter_byte)
+        .from_reader(BufReader::new(File::open(path).map_err(|e| e.to_string())?));
+
+    let mut headers = reader
+        .headers()
+        .map(|h| h.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        .map_err(|e| e.to_string())?;
+
+    apply_column_ops_to_headers(&mut headers, column_ops);
+
+    let normalized_ops = normalize_row_ops(row_ops);
+    let mut op_index = 0usize;
+    let mut output_index = 0usize;
+    let mut input_index = 0usize;
+
+    for record in reader.records() {
+        let record = record.map_err(|e| e.to_string())?;
+        let mut skip_current = false;
+
+        while op_index < normalized_ops.len()
+            && normalized_ops[op_index].input_index == input_index as isize
+        {
+            match &normalized_ops[op_index].op {
+                RowOp::Insert { values, .. } => {
+                    let mut row = values.clone();
+                    apply_column_ops_to_row(&mut row, column_ops);
+                    if clear_rows.contains(&output_index) {
+                        for value in row.iter_mut() {
+                            *value = String::new();
+                        }
+                    } else if !clear_cols.is_empty() {
+                        for col_idx in clear_cols {
+                            if *col_idx >= row.len() {
+                                row.resize(*col_idx + 1, String::new());
+                            }
+                            row[*col_idx] = String::new();
+                        }
+                    }
+                    if let Some(row_patches) = patch_map.get(&output_index) {
+                        for (col_idx, value) in row_patches {
+                            if *col_idx >= row.len() {
+                                row.resize(col_idx + 1, String::new());
+                            }
+                            row[*col_idx] = value.clone();
+                        }
+                    }
+                    on_row(output_index, row)?;
+                    output_index += 1;
+                }
+                RowOp::Delete { .. } => {
+                    skip_current = true;
+                }
+            }
+            op_index += 1;
+        }
+
+        if skip_current {
+            input_index += 1;
+            continue;
+        }
+
+        let mut row: Vec<String> = record.iter().map(|s| s.to_string()).collect();
+        apply_column_ops_to_row(&mut row, column_ops);
+        if clear_rows.contains(&output_index) {
+            for value in row.iter_mut() {
+                *value = String::new();
+            }
+        } else if !clear_cols.is_empty() {
+            for col_idx in clear_cols {
+                if *col_idx >= row.len() {
+                    row.resize(*col_idx + 1, String::new());
+                }
+                row[*col_idx] = String::new();
+            }
+        }
+        if let Some(row_patches) = patch_map.get(&output_index) {
+            for (col_idx, value) in row_patches {
+                if *col_idx >= row.len() {
+                    row.resize(col_idx + 1, String::new());
+                }
+                row[*col_idx] = value.clone();
+            }
+        }
+        on_row(output_index, row)?;
+        output_index += 1;
+        input_index += 1;
+    }
+
+    while op_index < normalized_ops.len() {
+        if let RowOp::Insert { values, .. } = &normalized_ops[op_index].op {
+            let mut row = values.clone();
+            apply_column_ops_to_row(&mut row, column_ops);
+            if clear_rows.contains(&output_index) {
+                for value in row.iter_mut() {
+                    *value = String::new();
+                }
+            } else if !clear_cols.is_empty() {
+                for col_idx in clear_cols {
+                    if *col_idx >= row.len() {
+                        row.resize(*col_idx + 1, String::new());
+                    }
+                    row[*col_idx] = String::new();
+                }
+            }
+            if let Some(row_patches) = patch_map.get(&output_index) {
+                for (col_idx, value) in row_patches {
+                    if *col_idx >= row.len() {
+                        row.resize(col_idx + 1, String::new());
+                    }
+                    row[*col_idx] = value.clone();
+                }
+            }
+            on_row(output_index, row)?;
+            output_index += 1;
+        }
+        op_index += 1;
+    }
+
+    Ok(headers)
+}
+
+struct RunReader {
+    reader: csv::Reader<BufReader<File>>,
+}
+
+struct HeapItem {
+    key: SortKey,
+    row: Vec<String>,
+    index: usize,
+    run_id: usize,
+}
+
+impl PartialEq for HeapItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.run_id == other.run_id
+    }
+}
+
+impl Eq for HeapItem {}
+
+impl PartialOrd for HeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HeapItem {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        // Reverse for min-heap behavior
+        other
+            .key
+            .cmp(&self.key)
+            .then_with(|| other.run_id.cmp(&self.run_id))
+    }
+}
+
+fn write_run_file(
+    temp_dir: &PathBuf,
+    run_id: usize,
+    delimiter_byte: u8,
+    sort_rules: &[SortRule],
+    rows: &mut Vec<(usize, Vec<String>)>,
+) -> Result<String, String> {
+    rows.sort_by(|a, b| compare_rows(&a.1, &b.1, sort_rules));
+    let path = temp_dir.join(format!("nmeditor_run_{}.csv", run_id));
+    let mut writer = csv::WriterBuilder::new()
+        .has_headers(false)
+        .delimiter(delimiter_byte)
+        .from_path(&path)
+        .map_err(|e| e.to_string())?;
+
+    for (index, row) in rows.iter() {
+        let mut record = Vec::with_capacity(row.len() + 1);
+        record.push(index.to_string());
+        record.extend(row.iter().cloned());
+        writer.write_record(&record).map_err(|e| e.to_string())?;
+    }
+
+    writer.flush().map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+fn merge_run_files(
+    temp_dir: &PathBuf,
+    run_paths: &[String],
+    delimiter_byte: u8,
+    sort_rules: &[SortRule],
+) -> Result<(String, usize), String> {
+    let output_path = temp_dir.join(format!(
+        "nmeditor_view_sorted_{}.csv",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    ));
+
+    let mut writer = csv::WriterBuilder::new()
+        .has_headers(false)
+        .delimiter(delimiter_byte)
+        .from_path(&output_path)
+        .map_err(|e| e.to_string())?;
+
+    let mut readers: Vec<RunReader> = Vec::new();
+    for path in run_paths {
+        let reader = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .delimiter(delimiter_byte)
+            .from_reader(BufReader::new(File::open(path).map_err(|e| e.to_string())?));
+        readers.push(RunReader { reader });
+    }
+
+    let mut heap = std::collections::BinaryHeap::new();
+    for (run_id, run) in readers.iter_mut().enumerate() {
+        let mut record = csv::StringRecord::new();
+        if run
+            .reader
+            .read_record(&mut record)
+            .map_err(|e| e.to_string())?
+        {
+            if record.len() == 0 {
+                continue;
+            }
+            let index = record.get(0).unwrap_or("0").parse::<usize>().unwrap_or(0);
+            let row: Vec<String> = record.iter().skip(1).map(|s| s.to_string()).collect();
+            let key = build_sort_key(&row, sort_rules);
+            heap.push(HeapItem {
+                key,
+                row,
+                index,
+                run_id,
+            });
+        }
+    }
+
+    let mut total = 0usize;
+    while let Some(item) = heap.pop() {
+        let mut record = Vec::with_capacity(item.row.len() + 1);
+        record.push(item.index.to_string());
+        record.extend(item.row.iter().cloned());
+        writer.write_record(&record).map_err(|e| e.to_string())?;
+        total += 1;
+
+        let run = &mut readers[item.run_id];
+        let mut next_record = csv::StringRecord::new();
+        if run
+            .reader
+            .read_record(&mut next_record)
+            .map_err(|e| e.to_string())?
+        {
+            if next_record.len() > 0 {
+                let index = next_record
+                    .get(0)
+                    .unwrap_or("0")
+                    .parse::<usize>()
+                    .unwrap_or(0);
+                let row: Vec<String> = next_record.iter().skip(1).map(|s| s.to_string()).collect();
+                let key = build_sort_key(&row, sort_rules);
+                heap.push(HeapItem {
+                    key,
+                    row,
+                    index,
+                    run_id: item.run_id,
+                });
+            }
+        }
+    }
+
+    writer.flush().map_err(|e| e.to_string())?;
+
+    for path in run_paths {
+        let _ = fs::remove_file(PathBuf::from(path));
+    }
+
+    Ok((output_path.to_string_lossy().to_string(), total))
 }
 
 #[tauri::command]
@@ -976,6 +1515,8 @@ fn save_csv_with_patches(
     patches: Vec<CsvPatch>,
     row_ops: Vec<RowOp>,
     column_ops: Vec<ColumnOp>,
+    clear_rows: Vec<usize>,
+    clear_cols: Vec<usize>,
     eol: Option<String>,
     bom: Option<bool>,
     encoding: Option<String>,
@@ -995,13 +1536,9 @@ fn save_csv_with_patches(
 
     let encoding = encoding.unwrap_or_else(|| "UTF-8".to_string());
     let use_utf16 = encoding.eq_ignore_ascii_case("UTF-16LE");
-    let mut patch_map: HashMap<usize, HashMap<usize, String>> = HashMap::new();
-    for patch in patches {
-        patch_map
-            .entry(patch.row)
-            .or_default()
-            .insert(patch.col, patch.value);
-    }
+    let patch_map = build_patch_map(&patches);
+    let clear_row_set: HashSet<usize> = clear_rows.into_iter().collect();
+    let clear_col_set: HashSet<usize> = clear_cols.into_iter().collect();
 
     let needs_replace = target_path == path;
     let write_target = if needs_replace {
@@ -1049,6 +1586,18 @@ fn save_csv_with_patches(
                 RowOp::Insert { values, .. } => {
                     let mut row = values.clone();
                     apply_column_ops_to_row(&mut row, &column_ops);
+                    if clear_row_set.contains(&output_index) {
+                        for value in row.iter_mut() {
+                            *value = String::new();
+                        }
+                    } else if !clear_col_set.is_empty() {
+                        for col_idx in &clear_col_set {
+                            if *col_idx >= row.len() {
+                                row.resize(*col_idx + 1, String::new());
+                            }
+                            row[*col_idx] = String::new();
+                        }
+                    }
                     if let Some(row_patches) = patch_map.get(&output_index) {
                         for (col_idx, value) in row_patches {
                             if *col_idx >= row.len() {
@@ -1074,6 +1623,18 @@ fn save_csv_with_patches(
 
         let mut row: Vec<String> = record.iter().map(|s| s.to_string()).collect();
         apply_column_ops_to_row(&mut row, &column_ops);
+        if clear_row_set.contains(&output_index) {
+            for value in row.iter_mut() {
+                *value = String::new();
+            }
+        } else if !clear_col_set.is_empty() {
+            for col_idx in &clear_col_set {
+                if *col_idx >= row.len() {
+                    row.resize(*col_idx + 1, String::new());
+                }
+                row[*col_idx] = String::new();
+            }
+        }
         if let Some(row_patches) = patch_map.get(&output_index) {
             for (col_idx, value) in row_patches {
                 if *col_idx >= row.len() {
@@ -1091,6 +1652,18 @@ fn save_csv_with_patches(
         if let RowOp::Insert { values, .. } = &normalized_ops[op_index].op {
             let mut row = values.clone();
             apply_column_ops_to_row(&mut row, &column_ops);
+            if clear_row_set.contains(&output_index) {
+                for value in row.iter_mut() {
+                    *value = String::new();
+                }
+            } else if !clear_col_set.is_empty() {
+                for col_idx in &clear_col_set {
+                    if *col_idx >= row.len() {
+                        row.resize(*col_idx + 1, String::new());
+                    }
+                    row[*col_idx] = String::new();
+                }
+            }
             if let Some(row_patches) = patch_map.get(&output_index) {
                 for (col_idx, value) in row_patches {
                     if *col_idx >= row.len() {
@@ -1409,6 +1982,324 @@ fn apply_find_replace_to_file(
     })
 }
 
+#[tauri::command]
+fn build_global_view(
+    state: tauri::State<AppState>,
+    path: String,
+    delimiter: String,
+    sort_rules: Vec<SortRule>,
+    filter_rules: Vec<FilterRule>,
+    patches: Vec<CsvPatch>,
+    row_ops: Vec<RowOp>,
+    column_ops: Vec<ColumnOp>,
+    clear_rows: Vec<usize>,
+    clear_cols: Vec<usize>,
+    memory_limit_mb: Option<u64>,
+) -> Result<GlobalViewResponse, String> {
+    let delimiter_byte = parse_delimiter(&delimiter);
+    let limit_mb = memory_limit_mb.unwrap_or(300);
+    let limit_bytes = limit_mb.saturating_mul(1024 * 1024);
+    let path_buf = PathBuf::from(&path);
+    let file_len = fs::metadata(&path_buf).map_err(|e| e.to_string())?.len();
+
+    let patch_map = build_patch_map(&patches);
+    let clear_row_set: HashSet<usize> = clear_rows.into_iter().collect();
+    let clear_col_set: HashSet<usize> = clear_cols.into_iter().collect();
+
+    let (mode, total_rows, index_key_for_view) = if file_len > limit_bytes && !sort_rules.is_empty() {
+        let temp_dir = std::env::temp_dir();
+        let chunk_limit = (limit_bytes.saturating_mul(60) / 100) as usize;
+        let mut chunk: Vec<(usize, Vec<String>)> = Vec::new();
+        let mut chunk_bytes = 0usize;
+        let mut run_id = 0usize;
+        let mut runs: Vec<String> = Vec::new();
+
+        let _ = stream_rows_with_ops(
+            &path_buf,
+            delimiter_byte,
+            &row_ops,
+            &column_ops,
+            &patch_map,
+            &clear_row_set,
+            &clear_col_set,
+            |row_index, row| {
+                if !row_matches_filters(&row, &filter_rules) {
+                    return Ok(());
+                }
+                let row_bytes: usize = row.iter().map(|cell| cell.len() * 2).sum();
+                chunk_bytes = chunk_bytes.saturating_add(row_bytes);
+                chunk.push((row_index, row));
+                if chunk_bytes >= chunk_limit && !chunk.is_empty() {
+                    let path = write_run_file(&temp_dir, run_id, delimiter_byte, &sort_rules, &mut chunk)?;
+                    runs.push(path);
+                    run_id += 1;
+                    chunk_bytes = 0;
+                    chunk.clear();
+                }
+                Ok(())
+            },
+        )?;
+
+        if !chunk.is_empty() {
+            let path = write_run_file(&temp_dir, run_id, delimiter_byte, &sort_rules, &mut chunk)?;
+            runs.push(path);
+        }
+
+        if runs.is_empty() {
+            let empty_path = temp_dir.join(format!(
+                "nmeditor_view_sorted_empty_{}.csv",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            ));
+            File::create(&empty_path).map_err(|e| e.to_string())?;
+            (
+                GlobalViewMode::TempFile(empty_path.to_string_lossy().to_string()),
+                0,
+                Some(index_key(
+                    &empty_path.to_string_lossy().to_string(),
+                    delimiter_byte,
+                )),
+            )
+        } else {
+            let (view_path, total_rows) =
+                merge_run_files(&temp_dir, &runs, delimiter_byte, &sort_rules)?;
+            let key = index_key(&view_path, delimiter_byte);
+            (GlobalViewMode::TempFile(view_path), total_rows, Some(key))
+        }
+    } else if file_len > limit_bytes && sort_rules.is_empty() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let temp_path = std::env::temp_dir().join(format!("nmeditor_view_{}.csv", stamp));
+        let mut writer = csv::WriterBuilder::new()
+            .has_headers(false)
+            .delimiter(delimiter_byte)
+            .from_path(&temp_path)
+            .map_err(|e| e.to_string())?;
+
+        let mut kept = 0usize;
+        let _ = stream_rows_with_ops(
+            &path_buf,
+            delimiter_byte,
+            &row_ops,
+            &column_ops,
+            &patch_map,
+            &clear_row_set,
+            &clear_col_set,
+            |row_index, row| {
+                if row_matches_filters(&row, &filter_rules) {
+                    let mut record = Vec::with_capacity(row.len() + 1);
+                    record.push(row_index.to_string());
+                    record.extend(row.iter().cloned());
+                    writer.write_record(&record).map_err(|e| e.to_string())?;
+                    kept += 1;
+                }
+                Ok(())
+            },
+        )?;
+
+        writer.flush().map_err(|e| e.to_string())?;
+        (
+            GlobalViewMode::TempFile(temp_path.to_string_lossy().to_string()),
+            kept,
+            Some(index_key(
+                &temp_path.to_string_lossy().to_string(),
+                delimiter_byte,
+            )),
+        )
+    } else {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let temp_path = std::env::temp_dir().join(format!("nmeditor_view_{}.csv", stamp));
+        let mut writer = csv::WriterBuilder::new()
+            .has_headers(false)
+            .delimiter(delimiter_byte)
+            .from_path(&temp_path)
+            .map_err(|e| e.to_string())?;
+
+        let mut kept = 0usize;
+        if sort_rules.is_empty() {
+            let _ = stream_rows_with_ops(
+                &path_buf,
+                delimiter_byte,
+                &row_ops,
+                &column_ops,
+                &patch_map,
+                &clear_row_set,
+                &clear_col_set,
+                |row_index, row| {
+                    if row_matches_filters(&row, &filter_rules) {
+                        let mut record = Vec::with_capacity(row.len() + 1);
+                        record.push(row_index.to_string());
+                        record.extend(row.iter().cloned());
+                        writer.write_record(&record).map_err(|e| e.to_string())?;
+                        kept += 1;
+                    }
+                    Ok(())
+                },
+            )?;
+        } else {
+            let mut paired: Vec<(usize, Vec<String>)> = Vec::new();
+            let _ = stream_rows_with_ops(
+                &path_buf,
+                delimiter_byte,
+                &row_ops,
+                &column_ops,
+                &patch_map,
+                &clear_row_set,
+                &clear_col_set,
+                |row_index, row| {
+                    if row_matches_filters(&row, &filter_rules) {
+                        paired.push((row_index, row));
+                    }
+                    Ok(())
+                },
+            )?;
+            paired.sort_by(|a, b| compare_rows(&a.1, &b.1, &sort_rules));
+            kept = paired.len();
+            for (row_index, row) in paired {
+                let mut record = Vec::with_capacity(row.len() + 1);
+                record.push(row_index.to_string());
+                record.extend(row.into_iter());
+                writer.write_record(&record).map_err(|e| e.to_string())?;
+            }
+        }
+
+        writer.flush().map_err(|e| e.to_string())?;
+        (
+            GlobalViewMode::TempFile(temp_path.to_string_lossy().to_string()),
+            kept,
+            Some(index_key(
+                &temp_path.to_string_lossy().to_string(),
+                delimiter_byte,
+            )),
+        )
+    };
+
+    if let (GlobalViewMode::TempFile(path), Some(idx_key)) = (&mode, &index_key_for_view) {
+        let path_buf = PathBuf::from(path);
+        if let Ok(index) = build_csv_index_for_file(&path_buf, delimiter_byte, false) {
+            if let Ok(mut indexes) = state.indexes.lock() {
+                indexes.insert(idx_key.clone(), Arc::new(index));
+                prune_index_cache(&mut indexes);
+            }
+        }
+    }
+
+    let view_id = state.next_view_id.fetch_add(1, Ordering::Relaxed);
+    let mut views = state.views.lock().map_err(|_| "lock poisoned")?;
+    views.insert(
+        view_id,
+        GlobalView {
+            mode,
+            delimiter: delimiter_byte,
+            index_key: index_key_for_view,
+        },
+    );
+    let mut stale_temp_files: Vec<String> = Vec::new();
+    let mut stale_index_keys: Vec<String> = Vec::new();
+    if views.len() > MAX_GLOBAL_VIEW_ENTRIES {
+        let mut ids: Vec<u64> = views.keys().copied().collect();
+        ids.sort_unstable();
+        let mut remove_count = views.len() - MAX_GLOBAL_VIEW_ENTRIES;
+        for id in ids {
+            if remove_count == 0 {
+                break;
+            }
+            if id == view_id {
+                continue;
+            }
+            if let Some(stale) = views.remove(&id) {
+                let GlobalViewMode::TempFile(path) = stale.mode;
+                stale_temp_files.push(path);
+                if let Some(key) = stale.index_key {
+                    stale_index_keys.push(key);
+                }
+            }
+            remove_count -= 1;
+        }
+    }
+    drop(views);
+    if !stale_index_keys.is_empty() {
+        if let Ok(mut indexes) = state.indexes.lock() {
+            for key in stale_index_keys {
+                indexes.remove(&key);
+            }
+        }
+    }
+    for path in stale_temp_files {
+        let _ = fs::remove_file(PathBuf::from(path));
+    }
+
+    Ok(GlobalViewResponse {
+        view_id,
+        total_rows,
+    })
+}
+
+#[tauri::command]
+fn read_global_view_rows(
+    state: tauri::State<AppState>,
+    view_id: u64,
+    start: usize,
+    limit: usize,
+) -> Result<CsvSlice, String> {
+    let views = state.views.lock().map_err(|_| "lock poisoned")?;
+    let view = views
+        .get(&view_id)
+        .ok_or_else(|| "view not found".to_string())?;
+
+    let (temp_path, delimiter) = match &view.mode {
+        GlobalViewMode::TempFile(path) => (path.clone(), view.delimiter),
+    };
+    drop(views);
+    let mut slice = read_csv_rows_window_internal(
+        &state,
+        temp_path,
+        Some(delimiter_to_string(delimiter)),
+        start,
+        limit,
+        false,
+    )?;
+    let mut indices: Vec<usize> = Vec::with_capacity(slice.rows.len());
+    for row in slice.rows.iter_mut() {
+        if row.is_empty() {
+            indices.push(0);
+            continue;
+        }
+        let raw = row.remove(0);
+        indices.push(raw.parse::<usize>().unwrap_or(0));
+    }
+    slice.row_indices = Some(indices);
+    Ok(slice)
+}
+
+#[tauri::command]
+fn release_global_view(state: tauri::State<AppState>, view_id: u64) -> Result<bool, String> {
+    let view = {
+        let mut views = state.views.lock().map_err(|_| "lock poisoned")?;
+        views.remove(&view_id)
+    };
+
+    if let Some(view) = view {
+        let GlobalViewMode::TempFile(path) = view.mode;
+        if let Some(key) = view.index_key {
+            if let Ok(mut indexes) = state.indexes.lock() {
+                indexes.remove(&key);
+            }
+        }
+        let _ = fs::remove_file(PathBuf::from(path));
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1418,6 +2309,8 @@ pub fn run() {
             indexes: Arc::new(Mutex::new(HashMap::new())),
             index_jobs: Arc::new(Mutex::new(HashMap::new())),
             next_index_job: AtomicU64::new(1),
+            views: Mutex::new(HashMap::new()),
+            next_view_id: AtomicU64::new(1),
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1444,6 +2337,9 @@ pub fn run() {
             apply_macro_to_file,
             compute_column_stats,
             apply_find_replace_to_file,
+            build_global_view,
+            read_global_view_rows,
+            release_global_view,
             set_menu_locale
         ])
         .on_menu_event(|app, event| {

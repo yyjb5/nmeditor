@@ -1,19 +1,47 @@
 .grid-shell {
-  border: 1px solid #d9dde3;
+  border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
-  background: #ffffff;
+  background: var(--surface);
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
 }
 
+.grid-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: #f8fafc;
+  border-bottom: 1px solid #e5e7eb;
+  font-size: 12px;
+  color: #334155;
+}
+
+.grid-info-label {
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.grid-info-pos {
+  font-variant-numeric: tabular-nums;
+  color: #1e293b;
+}
+
+.grid-info-value {
+  color: #64748b;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .grid-header {
   display: grid;
-  background: #f2f4f7;
-  color: #111827;
-  border-bottom: 1px solid #d9dde3;
+  background: var(--panel);
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
   overflow: hidden;
 }
 
@@ -22,13 +50,13 @@
   min-height: 0;
   overflow: auto;
   position: relative;
-  background: #ffffff;
+  background: var(--surface);
 }
 
 .grid-row {
   display: grid;
   border-bottom: 1px solid #e5e7eb;
-  background: #ffffff;
+  background: var(--surface);
   align-items: stretch;
   box-sizing: border-box;
 }
@@ -53,12 +81,15 @@
 }
 
 .cell.edited {
-  background: #fff8db;
-  color: #7a5200;
+  background: #fff7d6;
+  color: #6b4b00;
 }
 
 .cell.editing {
   padding: 0;
+  outline: 2px solid #1d4ed8;
+  outline-offset: -2px;
+  background: #eef2ff;
 }
 
 .cell.editing input {
@@ -92,6 +123,18 @@
 
 .cell.selected {
   background: #e0f2fe;
+}
+
+.cell.active {
+  outline: 2px solid #0ea5e9;
+  outline-offset: -2px;
+  background: #f0f9ff;
+}
+
+.cell.hidden-col {
+  padding: 0;
+  border-right: none;
+  pointer-events: none;
 }
 
 .resize-handle {

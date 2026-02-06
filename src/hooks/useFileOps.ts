@@ -46,8 +46,11 @@ type UseFileOpsParams = {
   patches: Record<string, string>;
   rowOps: RowOp[];
   columnOps: ColumnOp[];
+  clearRows: number[];
+  clearCols: number[];
   getCellValue: (row: number, col: number) => string;
-  applyPatch: (row: number, col: number, value: string) => void;
+  applyPatch: (row: number, col: number, value: string) => { key: string; prev: string | null; next: string | null } | undefined;
+  pushUndo: (op: { kind: "bulk"; entries: Array<{ key: string; prev: string | null; next: string | null }> }) => void;
   setError: (value: string | null) => void;
   setLoading: (value: boolean) => void;
   t: (en: string, zh: string) => string;
@@ -60,8 +63,11 @@ export default function useFileOps({
   patches,
   rowOps,
   columnOps,
+  clearRows,
+  clearCols,
   getCellValue,
   applyPatch,
+  pushUndo,
   setError,
   setLoading,
   t,
@@ -71,10 +77,12 @@ export default function useFileOps({
   const [macroFind, setMacroFind] = useState("");
   const [macroReplace, setMacroReplace] = useState("");
   const [macroText, setMacroText] = useState("");
+  const [macroScope, setMacroScope] = useState<"loaded" | "file">("loaded");
   const [macroAppliedCount, setMacroAppliedCount] = useState(0);
   const [macroOutputPath, setMacroOutputPath] = useState<string | null>(null);
   const [findText, setFindText] = useState("");
   const [replaceText, setReplaceText] = useState("");
+  const [findScope, setFindScope] = useState<"loaded" | "file">("loaded");
   const [useRegex, setUseRegex] = useState(false);
   const [matchCase, setMatchCase] = useState(false);
   const [findColumnInput, setFindColumnInput] = useState("");
@@ -90,6 +98,7 @@ export default function useFileOps({
   const [dialectEscape, setDialectEscape] = useState("\"");
   const [fullStats, setFullStats] = useState<FullColumnStat[] | null>(null);
   const [fullStatsLoading, setFullStatsLoading] = useState(false);
+  const [opStatus, setOpStatus] = useState<string | null>(null);
 
   const resetFileOps = () => {
     setMacroAppliedCount(0);
@@ -140,7 +149,9 @@ export default function useFileOps({
     }
 
     setError(null);
+    setOpStatus(t("Running macro...", "正在运行宏..."));
     let applied = 0;
+    const bulkEntries: Array<{ key: string; prev: string | null; next: string | null }> = [];
 
     rows.forEach((_, rowIdx) => {
       const current = getCellValue(rowIdx, columnIndex);
@@ -169,12 +180,19 @@ export default function useFileOps({
       }
 
       if (next !== current) {
-        applyPatch(rowIdx, columnIndex, next);
-        applied += 1;
+        const entry = applyPatch(rowIdx, columnIndex, next);
+        if (entry) {
+          bulkEntries.push(entry);
+          applied += 1;
+        }
       }
     });
 
     setMacroAppliedCount(applied);
+    if (bulkEntries.length) {
+      pushUndo({ kind: "bulk", entries: bulkEntries });
+    }
+    setOpStatus(null);
   };
 
   const applyFindReplace = () => {
@@ -208,7 +226,9 @@ export default function useFileOps({
     }
 
     setError(null);
+    setOpStatus(t("Applying find/replace...", "正在应用查找/替换..."));
     let applied = 0;
+    const bulkEntries: Array<{ key: string; prev: string | null; next: string | null }> = [];
 
     for (let rowIndex = startRow; rowIndex <= lastRow && rowIndex < rows.length; rowIndex += 1) {
       const columns = columnIndex === null ? headers.map((_, idx) => idx) : [columnIndex];
@@ -225,13 +245,20 @@ export default function useFileOps({
           next = current.replace(pattern, replaceText);
         }
         if (next !== current) {
-          applyPatch(rowIndex, col, next);
-          applied += 1;
+          const entry = applyPatch(rowIndex, col, next);
+          if (entry) {
+            bulkEntries.push(entry);
+            applied += 1;
+          }
         }
       });
     }
 
     setFindAppliedCount(applied);
+    if (bulkEntries.length) {
+      pushUndo({ kind: "bulk", entries: bulkEntries });
+    }
+    setOpStatus(null);
   };
 
   const runFindReplaceOnFile = async () => {
@@ -251,6 +278,7 @@ export default function useFileOps({
 
     setError(null);
     setLoading(true);
+    setOpStatus(t("Running macro on file...", "正在运行宏（全文件）..."));
     try {
       const spec: FindReplaceSpec = {
         find: findText,
@@ -276,6 +304,7 @@ export default function useFileOps({
       setError(String(err));
     } finally {
       setLoading(false);
+      setOpStatus(null);
     }
   };
 
@@ -300,6 +329,7 @@ export default function useFileOps({
 
     setError(null);
     setLoading(true);
+    setOpStatus(t("Applying find/replace on file...", "正在应用查找/替换（全文件）..."));
     try {
       const spec: CsvMacroSpec = {
         op: macroOp,
@@ -325,6 +355,7 @@ export default function useFileOps({
       setError(String(err));
     } finally {
       setLoading(false);
+      setOpStatus(null);
     }
   };
 
@@ -332,6 +363,7 @@ export default function useFileOps({
     if (!preview) return false;
     setError(null);
     setLoading(true);
+    setOpStatus(t("Saving file...", "正在保存文件..."));
     try {
       const patchList = Object.entries(patches).map(([key, value]) => {
         const [row, col] = key.split(":").map(Number);
@@ -345,6 +377,8 @@ export default function useFileOps({
         patches: patchList,
         rowOps,
         columnOps,
+        clearRows,
+        clearCols,
         eol: eolMode,
         bom: includeBom,
         encoding: encodingMode,
@@ -356,6 +390,7 @@ export default function useFileOps({
       return false;
     } finally {
       setLoading(false);
+      setOpStatus(null);
     }
     return true;
   };
@@ -378,6 +413,7 @@ export default function useFileOps({
     macroFind,
     macroReplace,
     macroText,
+    macroScope,
     macroAppliedCount,
     macroOutputPath,
     setMacroOp,
@@ -385,8 +421,10 @@ export default function useFileOps({
     setMacroFind,
     setMacroReplace,
     setMacroText,
+    setMacroScope,
     findText,
     replaceText,
+    findScope,
     useRegex,
     matchCase,
     findColumnInput,
@@ -396,6 +434,7 @@ export default function useFileOps({
     findOutputPath,
     setFindText,
     setReplaceText,
+    setFindScope,
     setUseRegex,
     setMatchCase,
     setFindColumnInput,
@@ -415,6 +454,7 @@ export default function useFileOps({
     setDialectEscape,
     fullStats,
     fullStatsLoading,
+    opStatus,
     resetFileOps,
     runFullStats,
     runMacro,

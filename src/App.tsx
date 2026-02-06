@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type UIEvent,
+} from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -7,6 +15,7 @@ import {
   open as openDialog,
   save as saveDialog,
 } from "@tauri-apps/plugin-dialog";
+import { stat } from "@tauri-apps/plugin-fs";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import FindBar from "./components/FindBar";
 import GridView from "./components/GridView";
@@ -14,7 +23,7 @@ import Panels from "./components/Panels";
 import Quickbar from "./components/Quickbar";
 import StatusBar from "./components/StatusBar";
 import SurfaceHeader from "./components/SurfaceHeader";
-import useRowColumnOps from "./hooks/useRowColumnOps";
+import useRowColumnOps, { type RowOp } from "./hooks/useRowColumnOps";
 import useCsvSession from "./hooks/useCsvSession";
 import useFileOps from "./hooks/useFileOps";
 import useSelection from "./hooks/useSelection";
@@ -23,11 +32,62 @@ import TabBar from "./components/TabBar";
 import type { TabData } from "./components/TabBar/types";
 import "./App.css";
 
-type PatchOp = {
-  key: string;
-  prev: string | null;
-  next: string | null;
+type PatchEntry = { key: string; value: string };
+type DiagnosticState = {
+  scrollEvents: number;
+  autoDown: number;
+  autoUp: number;
+  requestCalls: number;
+  loadCalls: number;
+  cacheHits: number;
+  lastStart: number | null;
+  lastRows: number;
+  lastEof: boolean;
+  lastScrollTop: number;
+  lastTotalSize: number;
+  blockedLoading: number;
+  blockedSuppress: number;
+  blockedEof: number;
+  blockedDuplicate: number;
+  lastAction: string;
 };
+
+const createDiagnosticState = (): DiagnosticState => ({
+  scrollEvents: 0,
+  autoDown: 0,
+  autoUp: 0,
+  requestCalls: 0,
+  loadCalls: 0,
+  cacheHits: 0,
+  lastStart: null,
+  lastRows: 0,
+  lastEof: false,
+  lastScrollTop: 0,
+  lastTotalSize: 0,
+  blockedLoading: 0,
+  blockedSuppress: 0,
+  blockedEof: 0,
+  blockedDuplicate: 0,
+  lastAction: "idle",
+});
+type UndoOp =
+  | { kind: "cell"; key: string; prev: string | null; next: string | null }
+  | { kind: "bulk"; entries: Array<{ key: string; prev: string | null; next: string | null }> }
+  | { kind: "clear_rows"; rows: number[]; patches: PatchEntry[] }
+  | { kind: "clear_cols"; cols: number[]; patches: PatchEntry[] }
+  | { kind: "row_insert"; index: number; values: string[] }
+  | { kind: "row_delete"; index: number; values: string[]; wasCleared?: boolean }
+  | { kind: "col_insert"; index: number; name: string }
+  | {
+      kind: "col_delete";
+      index: number;
+      name: string;
+      values: Array<{ row: number; value: string }>;
+      wasCleared?: boolean;
+    }
+  | { kind: "col_rename"; index: number; prev: string; next: string }
+  | { kind: "row_duplicate"; index: number; values: string[] }
+  | { kind: "col_duplicate"; index: number };
 
 type TabFileData = {
   fileType: "csv" | "text";
@@ -40,24 +100,29 @@ type TabFileData = {
     windowSize: number;
     eof: boolean;
     patches: Record<string, string>;
-    undoStack: PatchOp[];
-    redoStack: PatchOp[];
+    undoStack: UndoOp[];
+    redoStack: UndoOp[];
     columnWidths: number[];
     rowHeaderWidth: number;
     rowHeight: number;
     headerHeightOverride: number | null;
     rowHeightOverrides: Record<number, number>;
     autoFitColumns: boolean;
+    hiddenCols: number[];
     totalRows: number | null;
     preview: { path: string; delimiter: string } | null;
     activePath: string | null;
     rowOps: ReturnType<typeof useRowColumnOps>["rowOps"];
     columnOps: ReturnType<typeof useRowColumnOps>["columnOps"];
+    clearedRows: number[];
+    clearedCols: number[];
+    columnOrder: number[];
   };
   textData?: {
     content: string;
     dirty: boolean;
     path: string;
+    encoding: "UTF-8" | "UTF-16LE";
   };
 };
 
@@ -80,12 +145,16 @@ function App() {
   const [windowStart, setWindowStart] = useState(0);
   const [windowLoading, setWindowLoading] = useState(false);
   const [windowSize, setWindowSize] = useState(400);
+  const [fileSizeBytes, setFileSizeBytes] = useState<number | null>(null);
   const [columnWidths, setColumnWidths] = useState<number[]>([]);
   const [rowHeaderWidth, setRowHeaderWidth] = useState(52);
   const [rowHeight, setRowHeight] = useState(28);
   const [headerHeightOverride, setHeaderHeightOverride] = useState<number | null>(null);
   const [rowHeightOverrides, setRowHeightOverrides] = useState<Record<number, number>>({});
+  const [rowIndexMap, setRowIndexMap] = useState<number[] | null>(null);
   const [autoFitColumns, setAutoFitColumns] = useState(false);
+  const [hiddenCols, setHiddenCols] = useState<Set<number>>(new Set());
+  const [columnOrder, setColumnOrder] = useState<number[]>([]);
   const resizeStateRef = useRef<
     | { type: "col"; index: number; startX: number; startWidth: number }
     | { type: "colAll"; startX: number; startWidths: number[]; startRowHeaderWidth: number }
@@ -96,8 +165,8 @@ function App() {
     | null
   >(null);
   const [patches, setPatches] = useState<Record<string, string>>({});
-  const [undoStack, setUndoStack] = useState<PatchOp[]>([]);
-  const [redoStack, setRedoStack] = useState<PatchOp[]>([]);
+  const [undoStack, setUndoStack] = useState<UndoOp[]>([]);
+  const [redoStack, setRedoStack] = useState<UndoOp[]>([]);
   const [columnIndexInput, setColumnIndexInput] = useState("0");
   const [columnNameInput, setColumnNameInput] = useState("");
   const [rowIndexInput, setRowIndexInput] = useState("0");
@@ -111,6 +180,17 @@ function App() {
   const [filterRules, setFilterRules] = useState<Array<{ column: string; value: string }>>(
     [],
   );
+  const hasSortFilter = sortRules.length > 0 || filterRules.length > 0;
+  const [clearedRows, setClearedRows] = useState<Set<number>>(new Set());
+  const [clearedCols, setClearedCols] = useState<Set<number>>(new Set());
+  const [contextMenu, setContextMenu] = useState<
+    | { type: "row"; index: number; x: number; y: number }
+    | { type: "col"; index: number; x: number; y: number }
+    | null
+  >(null);
+  const [editingHeader, setEditingHeader] = useState<{ index: number; value: string } | null>(
+    null,
+  );
   const [showQuickbar, setShowQuickbar] = useState(true);
   const [showFindBar, setShowFindBar] = useState(true);
   const [showMacroPanel, setShowMacroPanel] = useState(false);
@@ -118,6 +198,22 @@ function App() {
   const [showExportPanel, setShowExportPanel] = useState(false);
   const [showFindPanel, setShowFindPanel] = useState(false);
   const [showStatsPanel, setShowStatsPanel] = useState(false);
+  const [sortFilterMemoryLimitMb, setSortFilterMemoryLimitMb] = useState(300);
+  const [sortFilterMemoryLimitText, setSortFilterMemoryLimitText] = useState("300");
+  const [pasteMode, setPasteMode] = useState<"auto" | "strict" | "delimiter">("auto");
+  const [columnSearch, setColumnSearch] = useState("");
+  const [importSkipRows, setImportSkipRows] = useState("0");
+  const [importFirstRowHeader, setImportFirstRowHeader] = useState(false);
+  const [recentFiles, setRecentFiles] = useState<string[]>(() => {
+    try {
+      const raw = window.localStorage.getItem("nmeditor.recentFiles");
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
   const [locale, setLocale] = useState<"en" | "zh">(() => {
     const stored = window.localStorage.getItem("nmeditor.locale");
     if (stored === "en" || stored === "zh") return stored;
@@ -131,11 +227,149 @@ function App() {
   const [tabs, setTabs] = useState<TabData[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [tabDataMap, setTabDataMap] = useState<Map<string, TabFileData>>(new Map());
+  const [globalViewTotal, setGlobalViewTotal] = useState<number | null>(null);
+  const [globalViewLoading, setGlobalViewLoading] = useState(false);
+  const [globalViewPatchTick, setGlobalViewPatchTick] = useState(0);
+  const globalViewIdRef = useRef<number | null>(null);
+  const globalViewBuildRef = useRef(0);
+  const globalViewRebuildTimerRef = useRef<number | null>(null);
+  const globalViewBuildRunningRef = useRef(false);
+  const globalViewBuildPendingRef = useRef(false);
+  const globalViewPatchTimerRef = useRef<number | null>(null);
+  const globalViewPatchPendingRef = useRef(false);
+  const pendingInitialSaveRef = useRef<{ tabId: string; type: "csv" | "text" } | null>(
+    null,
+  );
+  const draftSaveTimerRef = useRef<number | null>(null);
+  const pendingImportRef = useRef<{ skipRows: number; firstRowHeader: boolean } | null>(null);
+  const [diagnosticsEnabled, setDiagnosticsEnabled] = useState(() => {
+    try {
+      return window.localStorage.getItem("nmeditor.diagnostics") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [diagnosticState, setDiagnosticState] = useState<DiagnosticState>(createDiagnosticState);
+  const diagnosticRef = useRef<DiagnosticState>(createDiagnosticState());
+  const diagnosticRafRef = useRef<number | null>(null);
 
   const t = useCallback(
     (en: string, zh: string) => (locale === "zh" ? zh : en),
     [locale],
   );
+
+  const flushDiagnostics = useCallback(() => {
+    if (!diagnosticsEnabled) return;
+    if (diagnosticRafRef.current !== null) return;
+    diagnosticRafRef.current = window.requestAnimationFrame(() => {
+      diagnosticRafRef.current = null;
+      setDiagnosticState({ ...diagnosticRef.current });
+    });
+  }, [diagnosticsEnabled]);
+
+  const bumpDiagnostics = useCallback(
+    (updater: (current: DiagnosticState) => DiagnosticState) => {
+      if (!diagnosticsEnabled) return;
+      diagnosticRef.current = updater(diagnosticRef.current);
+      flushDiagnostics();
+    },
+    [diagnosticsEnabled, flushDiagnostics],
+  );
+
+  const resetDiagnostics = useCallback(() => {
+    const next = createDiagnosticState();
+    diagnosticRef.current = next;
+    setDiagnosticState(next);
+  }, []);
+
+  useEffect(() => {
+    if (!diagnosticsEnabled) {
+      if (diagnosticRafRef.current !== null) {
+        window.cancelAnimationFrame(diagnosticRafRef.current);
+        diagnosticRafRef.current = null;
+      }
+      return;
+    }
+    try {
+      window.localStorage.setItem("nmeditor.diagnostics", "1");
+    } catch {
+      // ignore storage failure
+    }
+    return () => {
+      if (diagnosticRafRef.current !== null) {
+        window.cancelAnimationFrame(diagnosticRafRef.current);
+        diagnosticRafRef.current = null;
+      }
+    };
+  }, [diagnosticsEnabled]);
+
+  useEffect(() => {
+    if (diagnosticsEnabled) return;
+    try {
+      window.localStorage.removeItem("nmeditor.diagnostics");
+    } catch {
+      // ignore storage failure
+    }
+  }, [diagnosticsEnabled]);
+
+  useEffect(() => {
+    const onToggleDiagnostics = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "d")) return;
+      event.preventDefault();
+      setDiagnosticsEnabled((current) => {
+        const next = !current;
+        if (next) {
+          resetDiagnostics();
+        }
+        return next;
+      });
+    };
+    window.addEventListener("keydown", onToggleDiagnostics);
+    return () => window.removeEventListener("keydown", onToggleDiagnostics);
+  }, [resetDiagnostics]);
+
+  const showPanels =
+    showMacroPanel || showOpsPanel || showExportPanel || showFindPanel || showStatsPanel;
+  const [drawerCollapsed, setDrawerCollapsed] = useState(false);
+  const showDrawer = showPanels && !drawerCollapsed;
+  const [sidebarWidth, setSidebarWidth] = useState(320);
+  const sidebarDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  const startSidebarResize = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    sidebarDragRef.current = { startX: event.clientX, startWidth: sidebarWidth };
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    const handleMove = (event: globalThis.MouseEvent) => {
+      const drag = sidebarDragRef.current;
+      if (!drag) return;
+      const nextWidth = Math.min(520, Math.max(220, drag.startWidth - (event.clientX - drag.startX)));
+      setSidebarWidth(nextWidth);
+    };
+    const handleUp = () => {
+      sidebarDragRef.current = null;
+    };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+  }, []);
+
+  const addRecentFile = useCallback((path: string) => {
+    setRecentFiles((current) => {
+      const next = [path, ...current.filter((item) => item !== path)].slice(0, 8);
+      try {
+        window.localStorage.setItem("nmeditor.recentFiles", JSON.stringify(next));
+      } catch {
+        // ignore storage failures
+      }
+      return next;
+    });
+  }, []);
+
 
   const {
     preview,
@@ -156,29 +390,174 @@ function App() {
     applyDelimiter,
   } = useCsvSession({ setError });
 
+
   const {
     textPath,
     textContent,
     textDirty,
     textLoading,
+    textEncoding,
     setTextContent,
     setTextPath,
     setTextContentState,
     setTextDirty,
+    setTextEncoding,
     openText,
     saveTextTo,
     resetTextSession,
   } = useTextSession({ setError });
 
   const MEMORY_BUDGET_BYTES = 2 * 1024 * 1024 * 1024;
+  const PREFETCH_ENABLED = true;
+  const AUTO_INDEX_THRESHOLD_BYTES = 300 * 1024 * 1024;
+  const GLOBAL_VIEW_REBUILD_DEBOUNCE_MS = 650;
+  const GLOBAL_VIEW_PATCH_DEBOUNCE_MS = 220;
+  const TAB_ROW_SNAPSHOT_LIMIT = 200;
+
+  const getDraftKey = useCallback((path: string) => {
+    const encoded = encodeURIComponent(path);
+    return `nmeditor.draft.${encoded}`;
+  }, []);
+
+  const clearDraftForPath = useCallback(
+    (path: string | null) => {
+      if (!path) return;
+      try {
+        window.localStorage.removeItem(getDraftKey(path));
+      } catch {
+        // ignore storage errors
+      }
+    },
+    [getDraftKey],
+  );
+
+  const loadDraftForPath = useCallback(
+    (path: string) => {
+      try {
+        const raw = window.localStorage.getItem(getDraftKey(path));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as {
+          patches?: Record<string, string>;
+          clearedRows?: number[];
+          clearedCols?: number[];
+          updatedAt?: number;
+        };
+        return parsed;
+      } catch {
+        return null;
+      }
+    },
+    [getDraftKey],
+  );
+
+  useEffect(() => {
+    const raw = window.localStorage.getItem("nmeditor.sortfilter.memoryLimitMb");
+    if (!raw) return;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isNaN(parsed) && parsed >= 50 && parsed <= 4096) {
+      setSortFilterMemoryLimitMb(parsed);
+      setSortFilterMemoryLimitText(String(parsed));
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      "nmeditor.sortfilter.memoryLimitMb",
+      String(sortFilterMemoryLimitMb),
+    );
+    setSortFilterMemoryLimitText(String(sortFilterMemoryLimitMb));
+  }, [sortFilterMemoryLimitMb]);
 
   const dataColumnCount = useMemo(() => {
     const rowMax = rows.reduce((max, row) => Math.max(max, row.length), 0);
     return Math.max(headers.length, rowMax);
   }, [headers.length, rows]);
 
-  const columnCount = Math.max(dataColumnCount, 3);
+  const MAX_UI_COLUMNS = 2000;
+  const displayColumnCount = Math.min(dataColumnCount, MAX_UI_COLUMNS);
+
+  const handleToggleColumnHidden = useCallback((index: number) => {
+    setHiddenCols((current) => {
+      const next = new Set(current);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  }, []);
+
+  const handleShowAllColumns = useCallback(() => {
+    setHiddenCols(new Set());
+  }, []);
+
+  const handleHideAllColumns = useCallback(() => {
+    const count = Math.max(dataColumnCount, 0);
+    setHiddenCols(new Set(Array.from({ length: count }, (_, idx) => idx)));
+  }, [dataColumnCount]);
+
+  useEffect(() => {
+    setColumnOrder((current) => {
+      if (!current.length) return current;
+      const maxIndex = Math.max(dataColumnCount, 0);
+      const filtered = current.filter((idx) => idx >= 0 && idx < maxIndex);
+      const missing: number[] = [];
+      const present = new Set(filtered);
+      for (let idx = 0; idx < maxIndex; idx += 1) {
+        if (!present.has(idx)) missing.push(idx);
+      }
+      return [...filtered, ...missing];
+    });
+  }, [dataColumnCount]);
+
+  const columnCount = Math.max(displayColumnCount, 3);
   const selectionColumnCount = columnCount;
+  const gridHeaders = useMemo(() => headers.slice(0, selectionColumnCount), [headers, selectionColumnCount]);
+  const globalViewRelevantColumns = useMemo(() => {
+    const columns = new Set<number>();
+    sortRules.forEach((rule) => {
+      const parsed = Number.parseInt(rule.column, 10);
+      if (!Number.isNaN(parsed) && parsed >= 0) columns.add(parsed);
+    });
+    filterRules.forEach((rule) => {
+      const parsed = Number.parseInt(rule.column, 10);
+      if (!Number.isNaN(parsed) && parsed >= 0) columns.add(parsed);
+    });
+    return columns;
+  }, [sortRules, filterRules]);
+
+  const queueGlobalViewPatchRefresh = useCallback(
+    (column: number) => {
+      if (!hasSortFilter) return;
+      if (globalViewRelevantColumns.size > 0 && !globalViewRelevantColumns.has(column)) return;
+      globalViewPatchPendingRef.current = true;
+      if (globalViewPatchTimerRef.current !== null) return;
+      globalViewPatchTimerRef.current = window.setTimeout(() => {
+        globalViewPatchTimerRef.current = null;
+        if (!globalViewPatchPendingRef.current) return;
+        globalViewPatchPendingRef.current = false;
+        setGlobalViewPatchTick((current) => current + 1);
+      }, GLOBAL_VIEW_PATCH_DEBOUNCE_MS);
+    },
+    [GLOBAL_VIEW_PATCH_DEBOUNCE_MS, globalViewRelevantColumns, hasSortFilter],
+  );
+
+  useEffect(() => {
+    if (hasSortFilter) return;
+    globalViewPatchPendingRef.current = false;
+    if (globalViewPatchTimerRef.current !== null) {
+      window.clearTimeout(globalViewPatchTimerRef.current);
+      globalViewPatchTimerRef.current = null;
+    }
+  }, [hasSortFilter]);
+
+  useEffect(
+    () => () => {
+      if (globalViewPatchTimerRef.current !== null) {
+        window.clearTimeout(globalViewPatchTimerRef.current);
+        globalViewPatchTimerRef.current = null;
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     setColumnWidths((current) => {
@@ -214,13 +593,16 @@ function App() {
       if (Array.isArray(parsed.columnWidths)) {
         setColumnWidths(parsed.columnWidths.map((value) => Math.max(60, Number(value) || 140)));
       }
-      if (typeof parsed.rowHeaderWidth === "number") {
+      if (typeof parsed.rowHeaderWidth === "number" && Number.isFinite(parsed.rowHeaderWidth)) {
         setRowHeaderWidth(Math.max(36, parsed.rowHeaderWidth));
       }
-      if (typeof parsed.rowHeight === "number") {
+      if (typeof parsed.rowHeight === "number" && Number.isFinite(parsed.rowHeight)) {
         setRowHeight(Math.max(18, Math.min(300, parsed.rowHeight)));
       }
-      if (typeof parsed.headerHeightOverride === "number") {
+      if (
+        typeof parsed.headerHeightOverride === "number" &&
+        Number.isFinite(parsed.headerHeightOverride)
+      ) {
         setHeaderHeightOverride(Math.max(18, Math.min(300, parsed.headerHeightOverride)));
       }
       if (parsed.rowHeightOverrides && typeof parsed.rowHeightOverrides === "object") {
@@ -228,7 +610,9 @@ function App() {
         Object.entries(parsed.rowHeightOverrides).forEach(([key, value]) => {
           const index = Number.parseInt(key, 10);
           if (Number.isNaN(index)) return;
-          const height = Math.max(18, Math.min(300, Number(value)));
+          const parsedValue = Number(value);
+          if (!Number.isFinite(parsedValue)) return;
+          const height = Math.max(18, Math.min(300, parsedValue));
           next[index] = height;
         });
         setRowHeightOverrides(next);
@@ -263,9 +647,18 @@ function App() {
     layoutStorageKey,
   ]);
 
-  const selectionRowCount = fileMode === "csv" ? (totalRows ?? rows.length) : rows.length;
+  const streamRowCount = useMemo(() => {
+    if (totalRows !== null) return totalRows;
+    return Math.max(windowStart + rows.length, rows.length);
+  }, [totalRows, windowStart, rows.length]);
+
+  const selectionRowCount =
+    fileMode === "csv"
+      ? (hasSortFilter ? globalViewTotal ?? rows.length : streamRowCount)
+      : rows.length;
 
   const {
+    selectionAnchor,
     selectionMode,
     isDraggingSelection,
     setIsDraggingSelection,
@@ -277,36 +670,61 @@ function App() {
     isColInSelection,
   } = useSelection(selectionRowCount, selectionColumnCount);
 
+  const mapViewRowToBase = useCallback(
+    (viewRow: number) => {
+      if (!rowIndexMap) return viewRow;
+      const offset = viewRow - windowStart;
+      if (offset < 0 || offset >= rowIndexMap.length) return viewRow;
+      return rowIndexMap[offset];
+    },
+    [rowIndexMap, windowStart],
+  );
+
   const getCellValue = useCallback(
     (row: number, col: number) => {
-      const key = `${row}:${col}`;
+      const baseRow = mapViewRowToBase(row);
+      const key = `${baseRow}:${col}`;
       if (Object.prototype.hasOwnProperty.call(patches, key)) {
         return patches[key];
+      }
+      if (clearedRows.has(baseRow) || clearedCols.has(col)) {
+        return "";
       }
       const localRow = row - windowStart;
       if (localRow < 0 || localRow >= rows.length) return "";
       return rows[localRow]?.[col] ?? "";
     },
-    [patches, rows, windowStart],
+    [clearedCols, clearedRows, mapViewRowToBase, patches, rows, windowStart],
   );
 
-  const applyPatchValue = useCallback((key: string, value: string | null) => {
-    setPatches((current) => {
-      const updated = { ...current };
-      if (value === null) {
-        delete updated[key];
-      } else {
-        updated[key] = value;
+  const applyPatchValue = useCallback(
+    (key: string, value: string | null) => {
+      const sep = key.lastIndexOf(":");
+      if (sep >= 0) {
+        const col = Number.parseInt(key.slice(sep + 1), 10);
+        if (!Number.isNaN(col)) {
+          queueGlobalViewPatchRefresh(col);
+        }
       }
-      return updated;
-    });
-  }, []);
+      setPatches((current) => {
+        const updated = { ...current };
+        if (value === null) {
+          delete updated[key];
+        } else {
+          updated[key] = value;
+        }
+        return updated;
+      });
+    },
+    [queueGlobalViewPatchRefresh],
+  );
 
   const applyPatch = useCallback(
     (row: number, col: number, value: string) => {
       const localRow = row - windowStart;
       if (localRow < 0 || localRow >= rows.length) return;
-      const key = `${row}:${col}`;
+      const baseRow = mapViewRowToBase(row);
+      const key = `${baseRow}:${col}`;
       const baseValue = rows[localRow]?.[col] ?? "";
       const hasPatch = Object.prototype.hasOwnProperty.call(patches, key);
       const currentValue = hasPatch ? patches[key] : baseValue;
@@ -314,13 +732,19 @@ function App() {
 
       const nextValue = value === baseValue ? null : value;
       applyPatchValue(key, nextValue);
-      setUndoStack((current) => [
-        ...current,
-        { key, prev: hasPatch ? patches[key] : baseValue, next: nextValue },
-      ]);
+      return { key, prev: hasPatch ? patches[key] : baseValue, next: nextValue };
+    },
+    [applyPatchValue, mapViewRowToBase, patches, rows, windowStart],
+  );
+
+  const applyPatchWithUndo = useCallback(
+    (row: number, col: number, value: string) => {
+      const entry = applyPatch(row, col, value);
+      if (!entry) return;
+      setUndoStack((current) => [...current, { kind: "cell", ...entry }]);
       setRedoStack([]);
     },
-    [applyPatchValue, patches, rows, windowStart],
+    [applyPatch],
   );
 
   const startEditing = (row: number, col: number) => {
@@ -329,7 +753,7 @@ function App() {
 
   const commitEditing = () => {
     if (!editingCell) return;
-    applyPatch(editingCell.row, editingCell.col, editingCell.value);
+    applyPatchWithUndo(editingCell.row, editingCell.col, editingCell.value);
     setEditingCell(null);
   };
 
@@ -341,8 +765,103 @@ function App() {
     setUndoStack((current) => {
       if (!current.length) return current;
       const last = current[current.length - 1];
-      applyPatchValue(last.key, last.prev);
-      setRedoStack((redo) => [...redo, last]);
+      if (last.kind === "cell") {
+        applyPatchValue(last.key, last.prev);
+        setRedoStack((redo) => [...redo, last]);
+      }
+      if (last.kind === "bulk") {
+        last.entries.forEach((entry) => applyPatchValue(entry.key, entry.prev));
+        setRedoStack((redo) => [...redo, last]);
+      }
+      if (last.kind === "clear_rows") {
+        setClearedRows((prev) => {
+          const next = new Set(prev);
+          last.rows.forEach((row) => next.delete(row));
+          return next;
+        });
+        setPatches((prev) => {
+          const next = { ...prev };
+          last.patches.forEach((entry) => {
+            next[entry.key] = entry.value;
+          });
+          return next;
+        });
+        setRedoStack((redo) => [...redo, last]);
+      }
+      if (last.kind === "clear_cols") {
+        setClearedCols((prev) => {
+          const next = new Set(prev);
+          last.cols.forEach((col) => next.delete(col));
+          return next;
+        });
+        setPatches((prev) => {
+          const next = { ...prev };
+          last.patches.forEach((entry) => {
+            next[entry.key] = entry.value;
+          });
+          return next;
+        });
+        setRedoStack((redo) => [...redo, last]);
+      }
+      if (last.kind === "row_insert") {
+        shiftClearedRowsOnDelete(last.index);
+        deleteRowAtIndex(last.index);
+        setRedoStack((redo) => [...redo, last]);
+      }
+      if (last.kind === "row_delete") {
+        shiftClearedRowsOnInsert(last.index);
+        insertRowAtIndex(last.index, last.values);
+        if (last.wasCleared) {
+          setClearedRows((prev) => {
+            const next = new Set(prev);
+            next.add(last.index);
+            return next;
+          });
+        }
+        setRedoStack((redo) => [...redo, last]);
+      }
+      if (last.kind === "col_insert") {
+        shiftClearedColsOnDelete(last.index);
+        deleteColumnAtIndex(last.index);
+        setRedoStack((redo) => [...redo, last]);
+      }
+      if (last.kind === "col_delete") {
+        shiftClearedColsOnInsert(last.index);
+        insertColumnAtIndex(last.index, last.name);
+        if (last.values.length) {
+          setPatches((prev) => {
+            const next = { ...prev };
+            last.values.forEach(({ row, value }) => {
+              if (value !== "") {
+                next[`${row}:${last.index}`] = value;
+              }
+            });
+            return next;
+          });
+        }
+        if (last.wasCleared) {
+          setClearedCols((prev) => {
+            const next = new Set(prev);
+            next.add(last.index);
+            return next;
+          });
+        }
+        setRedoStack((redo) => [...redo, last]);
+      }
+      if (last.kind === "col_rename") {
+        renameColumnAtIndex(last.index, last.prev);
+        setRedoStack((redo) => [...redo, last]);
+      }
+      if (last.kind === "row_duplicate") {
+        shiftClearedRowsOnDelete(last.index);
+        deleteRowAtIndex(last.index);
+        setRedoStack((redo) => [...redo, last]);
+      }
+      if (last.kind === "col_duplicate") {
+        shiftClearedColsOnDelete(last.index + 1);
+        deleteColumnAtIndex(last.index + 1);
+        setRedoStack((redo) => [...redo, last]);
+      }
       return current.slice(0, -1);
     });
   };
@@ -351,8 +870,78 @@ function App() {
     setRedoStack((current) => {
       if (!current.length) return current;
       const last = current[current.length - 1];
-      applyPatchValue(last.key, last.next);
-      setUndoStack((undoStackCurrent) => [...undoStackCurrent, last]);
+      if (last.kind === "cell") {
+        applyPatchValue(last.key, last.next);
+        setUndoStack((undoStackCurrent) => [...undoStackCurrent, last]);
+      }
+      if (last.kind === "bulk") {
+        last.entries.forEach((entry) => applyPatchValue(entry.key, entry.next));
+        setUndoStack((undoStackCurrent) => [...undoStackCurrent, last]);
+      }
+      if (last.kind === "clear_rows") {
+        setClearedRows((prev) => {
+          const next = new Set(prev);
+          last.rows.forEach((row) => next.add(row));
+          return next;
+        });
+        setPatches((prev) => {
+          const next = { ...prev };
+          last.patches.forEach((entry) => {
+            delete next[entry.key];
+          });
+          return next;
+        });
+        setUndoStack((undoStackCurrent) => [...undoStackCurrent, last]);
+      }
+      if (last.kind === "clear_cols") {
+        setClearedCols((prev) => {
+          const next = new Set(prev);
+          last.cols.forEach((col) => next.add(col));
+          return next;
+        });
+        setPatches((prev) => {
+          const next = { ...prev };
+          last.patches.forEach((entry) => {
+            delete next[entry.key];
+          });
+          return next;
+        });
+        setUndoStack((undoStackCurrent) => [...undoStackCurrent, last]);
+      }
+      if (last.kind === "row_insert") {
+        shiftClearedRowsOnInsert(last.index);
+        insertRowAtIndex(last.index, last.values);
+        setUndoStack((undoStackCurrent) => [...undoStackCurrent, last]);
+      }
+      if (last.kind === "row_delete") {
+        shiftClearedRowsOnDelete(last.index);
+        deleteRowAtIndex(last.index);
+        setUndoStack((undoStackCurrent) => [...undoStackCurrent, last]);
+      }
+      if (last.kind === "col_insert") {
+        shiftClearedColsOnInsert(last.index);
+        insertColumnAtIndex(last.index, last.name);
+        setUndoStack((undoStackCurrent) => [...undoStackCurrent, last]);
+      }
+      if (last.kind === "col_delete") {
+        shiftClearedColsOnDelete(last.index);
+        deleteColumnAtIndex(last.index);
+        setUndoStack((undoStackCurrent) => [...undoStackCurrent, last]);
+      }
+      if (last.kind === "col_rename") {
+        renameColumnAtIndex(last.index, last.next);
+        setUndoStack((undoStackCurrent) => [...undoStackCurrent, last]);
+      }
+      if (last.kind === "row_duplicate") {
+        shiftClearedRowsOnInsert(last.index);
+        insertRowAtIndex(last.index, last.values);
+        setUndoStack((undoStackCurrent) => [...undoStackCurrent, last]);
+      }
+      if (last.kind === "col_duplicate") {
+        shiftClearedColsOnInsert(last.index + 1);
+        duplicateColumnAtIndex(last.index);
+        setUndoStack((undoStackCurrent) => [...undoStackCurrent, last]);
+      }
       return current.slice(0, -1);
     });
   };
@@ -370,6 +959,11 @@ function App() {
     [delimiterApplied, delimiter],
   );
 
+  const pushUndo = (op: UndoOp) => {
+    setUndoStack((current) => [...current, op]);
+    setRedoStack([]);
+  };
+
   const {
     rowOps,
     columnOps,
@@ -377,10 +971,16 @@ function App() {
     setColumnOps,
     resetOps,
     insertRow,
+    insertRowAtIndex,
     deleteRow,
+    deleteRowAtIndex,
     insertColumn,
+    insertColumnAtIndex,
+    duplicateColumnAtIndex,
     deleteColumn,
+    deleteColumnAtIndex,
     renameColumn,
+    renameColumnAtIndex,
     copySelection,
     pasteSelection,
   } = useRowColumnOps({
@@ -392,6 +992,8 @@ function App() {
     getColumnCount,
     getCellValue,
     applyPatch,
+    pushUndo,
+    pasteMode,
     getCurrentDelimiter,
     getActiveRange,
     clearSelection,
@@ -403,12 +1005,49 @@ function App() {
     t,
   });
 
+  const applyPendingImportRules = useCallback(() => {
+    const pending = pendingImportRef.current;
+    if (!pending || fileMode !== "csv") return;
+    const skipRows = Math.max(0, Math.floor(pending.skipRows));
+    const removeCount = skipRows + (pending.firstRowHeader ? 1 : 0);
+    if (!rows.length) return;
+
+    if (removeCount > 0) {
+      const nextOps: RowOp[] = new Array(removeCount)
+        .fill(null)
+        .map(() => ({ type: "delete", index: 0 }));
+      setRowOps(nextOps);
+      setClearedRows(new Set());
+      setClearedCols(new Set());
+      if (totalRows !== null) {
+        setTotalRows(Math.max(0, totalRows - removeCount));
+      }
+    }
+
+    if (pending.firstRowHeader && rows.length) {
+      setHeaders(rows[0] ?? []);
+      setRows(rows.slice(1));
+    }
+
+    setWindowStart(skipRows + (pending.firstRowHeader ? 1 : 0));
+
+    pendingImportRef.current = null;
+  }, [fileMode, rows, setRowOps, setRows, setHeaders, setWindowStart, totalRows]);
+
+  useEffect(() => {
+    if (!pendingImportRef.current) return;
+    if (fileMode !== "csv" || loading) return;
+    if (!rows.length) return;
+    applyPendingImportRules();
+  }, [applyPendingImportRules, fileMode, loading, rows.length]);
+
   const {
     macroOp,
     macroColumn,
     macroFind,
     macroReplace,
     macroText,
+    macroScope,
     macroAppliedCount,
     macroOutputPath,
     setMacroOp,
@@ -416,8 +1055,10 @@ function App() {
     setMacroFind,
     setMacroReplace,
     setMacroText,
+    setMacroScope,
     findText,
     replaceText,
+    findScope,
     useRegex,
     matchCase,
     findColumnInput,
@@ -427,6 +1068,7 @@ function App() {
     findOutputPath,
     setFindText,
     setReplaceText,
+    setFindScope,
     setUseRegex,
     setMatchCase,
     setFindColumnInput,
@@ -446,6 +1088,7 @@ function App() {
     setDialectEscape,
     fullStats,
     fullStatsLoading,
+    opStatus,
     resetFileOps,
     runFullStats,
     runMacro,
@@ -461,8 +1104,11 @@ function App() {
     patches,
     rowOps,
     columnOps,
+    clearRows: Array.from(clearedRows),
+    clearCols: Array.from(clearedCols),
     getCellValue,
     applyPatch,
+    pushUndo,
     setError,
     setLoading,
     t,
@@ -512,53 +1158,22 @@ function App() {
     setFilterRules((current) => current.filter((_, idx) => idx !== index));
   };
 
-  const visibleRowIndices = useMemo(() => {
-    const indices = rows.map((_, idx) => windowStart + idx);
-    const filtered = indices.filter((rowIndex) =>
-      filterRules.every((rule) => {
-        const colIndex = Number.parseInt(rule.column, 10);
-        if (Number.isNaN(colIndex)) return true;
-        return getCellValue(rowIndex, colIndex).includes(rule.value);
-      }),
-    );
-
-    if (!sortRules.length) return filtered;
-
-    const sorted = [...filtered];
-    sorted.sort((a, b) => {
-      for (const rule of sortRules) {
-        const colIndex = Number.parseInt(rule.column, 10);
-        if (Number.isNaN(colIndex)) continue;
-        const aValue = getCellValue(a, colIndex);
-        const bValue = getCellValue(b, colIndex);
-        const order = aValue.localeCompare(bValue, undefined, {
-          numeric: true,
-          sensitivity: "base",
-        });
-        if (order !== 0) {
-          return rule.direction === "asc" ? order : -order;
-        }
-      }
-      return 0;
-    });
-
-    return sorted;
-  }, [rows, filterRules, sortRules, getCellValue, windowStart]);
-
-  const hasSortFilter = sortRules.length > 0 || filterRules.length > 0;
-
   const totalRowCount = hasSortFilter
-    ? visibleRowIndices.length
-    : totalRows ?? rows.length;
+    ? globalViewTotal ?? rows.length
+    : streamRowCount;
+
+  const effectiveTotalRows = hasSortFilter ? globalViewTotal : totalRows;
+
+  const virtualCount = rows.length;
+  const virtualPaddingStart = windowStart * rowHeight;
+  const virtualPaddingEnd =
+    effectiveTotalRows !== null
+      ? Math.max(effectiveTotalRows - windowStart - rows.length, 0) * rowHeight
+      : 0;
 
   const getRowIndex = useCallback(
-    (virtualIndex: number) => {
-      if (hasSortFilter) {
-        return visibleRowIndices[virtualIndex] ?? null;
-      }
-      return virtualIndex;
-    },
-    [hasSortFilter, visibleRowIndices],
+    (virtualIndex: number) => windowStart + virtualIndex,
+    [windowStart],
   );
 
   const isRowLoaded = useCallback(
@@ -581,8 +1196,12 @@ function App() {
       widths = [...widths, ...new Array(selectionColumnCount - widths.length).fill(140)];
     }
 
-    return `${rowHeaderWidth}px ${widths.map((width) => `${width}px`).join(" ")}`;
-  }, [columnWidths, rowHeaderWidth, selectionColumnCount]);
+    const columnDefs = widths.map((width, index) =>
+      hiddenCols.has(index) ? "0px" : `${width}px`,
+    );
+
+    return `${rowHeaderWidth}px ${columnDefs.join(" ")}`;
+  }, [columnWidths, hiddenCols, rowHeaderWidth, selectionColumnCount]);
 
   const computeAutoFit = useCallback(() => {
     const widths = new Array(selectionColumnCount).fill(80);
@@ -590,7 +1209,10 @@ function App() {
     headerLabels.forEach((label, idx) => {
       widths[idx] = Math.max(widths[idx], label.length * 8 + 24);
     });
-    rows.forEach((_, rowOffset) => {
+    const maxCells = 20000;
+    const maxRows = Math.max(50, Math.floor(maxCells / Math.max(selectionColumnCount, 1)));
+    const sampleRows = rows.length > maxRows ? rows.slice(0, maxRows) : rows;
+    sampleRows.forEach((_, rowOffset) => {
       const rowIndex = windowStart + rowOffset;
       for (let col = 0; col < selectionColumnCount; col += 1) {
         const value = getCellValue(rowIndex, col);
@@ -601,16 +1223,19 @@ function App() {
     setColumnWidths(clamped);
   }, [selectionColumnCount, headers, rows, windowStart, getCellValue]);
 
+
   useEffect(() => {
     if (!autoFitColumns) return;
     computeAutoFit();
   }, [autoFitColumns, computeAutoFit]);
 
   const parentRef = useRef<HTMLDivElement | null>(null);
+  const windowStartAdjustRef = useRef<number | null>(null);
   const pendingWindowRef = useRef<{
     start: number;
     path?: string;
     delimiter?: string;
+    viewId?: number | null;
   } | null>(null);
 
   const windowLoadingRef = useRef(false);
@@ -620,18 +1245,33 @@ function App() {
     start: number;
     rows: string[][];
     eof: boolean;
-    path: string;
-    delimiter: string;
+    path?: string;
+    delimiter?: string;
+    viewId?: number | null;
+    rowIndices?: number[] | null;
   } | null>(null);
   const prefetchUpRef = useRef<{
     start: number;
     rows: string[][];
     eof: boolean;
-    path: string;
-    delimiter: string;
+    path?: string;
+    delimiter?: string;
+    viewId?: number | null;
+    rowIndices?: number[] | null;
   } | null>(null);
   const prefetchingRef = useRef(false);
   const prefetchTimerRef = useRef<number | null>(null);
+  const suppressAutoLoadRef = useRef(false);
+  const suppressAutoLoadTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    windowStartAdjustRef.current = null;
+    suppressAutoLoadRef.current = false;
+    if (suppressAutoLoadTimerRef.current !== null) {
+      window.clearTimeout(suppressAutoLoadTimerRef.current);
+      suppressAutoLoadTimerRef.current = null;
+    }
+  }, [preview?.path, activePath, fileMode]);
 
   // Track edits and update isDirty flag
   useEffect(() => {
@@ -642,7 +1282,11 @@ function App() {
 
     const isDirty =
       currentTab.fileType === "csv"
-        ? Object.keys(patches).length > 0 || rowOps.length > 0 || columnOps.length > 0
+        ? Object.keys(patches).length > 0 ||
+          rowOps.length > 0 ||
+          columnOps.length > 0 ||
+          clearedRows.size > 0 ||
+          clearedCols.size > 0
         : textDirty;
 
     if (currentTab.isDirty !== isDirty) {
@@ -650,52 +1294,85 @@ function App() {
         tab.id === activeTabId ? { ...tab, isDirty } : tab
       ));
     }
-  }, [activeTabId, tabs, patches, textDirty, rowOps, columnOps]);
+  }, [activeTabId, tabs, patches, textDirty, rowOps, columnOps, clearedRows, clearedCols]);
 
   const indexPollRef = useRef<number | null>(null);
+  const lastAutoRequestRef = useRef<number | null>(null);
+
+  const resetWindowCaches = useCallback(() => {
+    if (debounceTimerRef.current !== null) {
+      window.clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    pendingWindowRef.current = null;
+    prefetchRef.current = null;
+    prefetchUpRef.current = null;
+    if (prefetchTimerRef.current !== null) {
+      window.clearTimeout(prefetchTimerRef.current);
+      prefetchTimerRef.current = null;
+    }
+    prefetchingRef.current = false;
+    requestIdRef.current += 1;
+    lastAutoRequestRef.current = null;
+    windowLoadingRef.current = false;
+    setWindowLoading(false);
+    suppressAutoLoadRef.current = false;
+    if (suppressAutoLoadTimerRef.current !== null) {
+      window.clearTimeout(suppressAutoLoadTimerRef.current);
+      suppressAutoLoadTimerRef.current = null;
+    }
+  }, [setWindowLoading]);
 
   const rowVirtualizer = useVirtualizer({
-    count: totalRowCount,
+    count: virtualCount,
+    paddingStart: virtualPaddingStart,
+    paddingEnd: virtualPaddingEnd,
     getScrollElement: () => parentRef.current,
     estimateSize: (index) => {
       const rowIndex = getRowIndex(index);
       if (rowIndex === null) return rowHeight;
       return getRowHeight(rowIndex);
     },
-    overscan: 12,
-    onChange: (instance) => {
-      if (fileMode !== "csv" || hasSortFilter) return;
-      const items = instance.getVirtualItems();
-      if (!items.length) return;
-      const first = items[0].index;
-      const last = items[items.length - 1].index;
-      const maxStart = Math.max(totalRowCount - windowSize, 0);
-      const jumpDistance = Math.abs(first - windowStart);
-
-      if (jumpDistance > windowSize * 1.5) {
-        const targetStart = Math.min(
-          Math.max(first - Math.floor(windowSize * 0.4), 0),
-          maxStart,
-        );
-        if (targetStart !== windowStart) {
-          void requestWindow(targetStart);
-        }
-        return;
-      }
-
-      if (last >= windowStart + rows.length - 20 && windowStart < maxStart) {
-        const nextStart = Math.min(Math.max(last - Math.floor(windowSize * 0.7), 0), maxStart);
-        if (nextStart !== windowStart) {
-          void requestWindow(nextStart);
-        }
-      } else if (first <= windowStart + 20 && windowStart > 0) {
-        const nextStart = Math.max(Math.min(first - Math.floor(windowSize * 0.3), maxStart), 0);
-        if (nextStart !== windowStart) {
-          void requestWindow(nextStart);
-        }
-      }
-    },
+    overscan: 8,
   });
+
+  useEffect(() => {
+    lastAutoRequestRef.current = null;
+  }, [windowStart, rows.length]);
+
+  useEffect(() => {
+    const prev = windowStartAdjustRef.current;
+    if (prev === null) {
+      windowStartAdjustRef.current = windowStart;
+      return;
+    }
+    const delta = windowStart - prev;
+    if (delta !== 0 && parentRef.current) {
+      suppressAutoLoadRef.current = true;
+      parentRef.current.scrollTop += delta * rowHeight;
+      // When total row count is unknown, keeping exact bottom anchoring can
+      // continuously re-trigger "load next window" and cause runaway loading.
+      if (delta > 0 && effectiveTotalRows === null) {
+        const threshold = rowHeight * 6;
+        const maxScrollTop = Math.max(
+          parentRef.current.scrollHeight - parentRef.current.clientHeight,
+          0,
+        );
+        const safeTop = Math.max(maxScrollTop - threshold - 1, 0);
+        if (parentRef.current.scrollTop > safeTop) {
+          parentRef.current.scrollTop = safeTop;
+        }
+      }
+      if (suppressAutoLoadTimerRef.current !== null) {
+        window.clearTimeout(suppressAutoLoadTimerRef.current);
+      }
+      suppressAutoLoadTimerRef.current = window.setTimeout(() => {
+        suppressAutoLoadRef.current = false;
+        suppressAutoLoadTimerRef.current = null;
+      }, 120);
+    }
+    windowStartAdjustRef.current = windowStart;
+  }, [windowStart, rowHeight, effectiveTotalRows]);
 
   useEffect(() => {
     rowVirtualizer.measure();
@@ -720,6 +1397,7 @@ function App() {
   );
 
   const columnStats = useMemo(() => {
+    if (!showStatsPanel) return [];
     if (!rows.length || dataColumnCount === 0) return [];
     return Array.from({ length: dataColumnCount }, (_, colIndex) => {
       const values = rows.map((_, rowIndex) => getCellValue(windowStart + rowIndex, colIndex));
@@ -731,28 +1409,115 @@ function App() {
         inferred: inferType(nonEmptyValues),
       };
     });
-  }, [rows, dataColumnCount, headers, getCellValue, inferType, t]);
+  }, [showStatsPanel, rows, dataColumnCount, headers, getCellValue, inferType, t]);
+
+  const applyColumnOpsToRow = useCallback((row: string[]) => {
+    if (!columnOps.length) return row;
+    let next = [...row];
+    columnOps.forEach((op) => {
+      if (op.type === "insert") {
+        const idx = Math.min(Math.max(op.index, 0), next.length);
+        next.splice(idx, 0, "");
+      }
+      if (op.type === "delete") {
+        if (op.index >= 0 && op.index < next.length) {
+          next.splice(op.index, 1);
+        }
+      }
+      if (op.type === "duplicate") {
+        const idx = Math.min(Math.max(op.index, 0), next.length);
+        const from = op.from;
+        const value = from >= 0 && from < next.length ? next[from] ?? "" : "";
+        next.splice(idx, 0, value);
+      }
+    });
+    return next;
+  }, [columnOps]);
+
+  const applyColumnOpsToRows = useCallback(
+    (sliceRows: string[][]) => {
+      if (!columnOps.length) return sliceRows;
+      return sliceRows.map((row) => applyColumnOpsToRow(row));
+    },
+    [applyColumnOpsToRow, columnOps.length],
+  );
+
+  const columnSelectOptions = useMemo(() => {
+    const count = Math.max(displayColumnCount, 3);
+    if (headers.length) {
+      const base = headers.slice(0, count).map((name, idx) => ({
+        value: String(idx),
+        label: name ? `${idx}: ${name}` : t(`Column ${idx + 1}`, `列 ${idx + 1}`),
+      }));
+      if (!columnOrder.length) return base;
+      return columnOrder
+        .filter((idx) => idx >= 0 && idx < base.length)
+        .map((idx) => base[idx]);
+    }
+    const base = new Array(count).fill(null).map((_, idx) => ({
+      value: String(idx),
+      label: t(`Column ${idx + 1}`, `列 ${idx + 1}`),
+    }));
+    if (!columnOrder.length) return base;
+    return columnOrder
+      .filter((idx) => idx >= 0 && idx < base.length)
+      .map((idx) => base[idx]);
+  }, [dataColumnCount, headers, t, columnOrder]);
+
+  const moveColumnInOrder = useCallback((index: number, direction: -1 | 1) => {
+    setColumnOrder((current) => {
+      const pos = current.indexOf(index);
+      if (pos === -1) return current;
+      const nextPos = pos + direction;
+      if (nextPos < 0 || nextPos >= current.length) return current;
+      const next = [...current];
+      [next[pos], next[nextPos]] = [next[nextPos], next[pos]];
+      return next;
+    });
+  }, []);
+
+  const releaseGlobalView = useCallback(async (viewId: number | null) => {
+    if (!viewId) return;
+    try {
+      await invoke("release_global_view", { viewId });
+    } catch {
+      // ignore cleanup errors
+    }
+  }, []);
 
   const resetSessionState = useCallback(() => {
+    if (globalViewIdRef.current) {
+      void releaseGlobalView(globalViewIdRef.current);
+    }
+    globalViewIdRef.current = null;
+    setGlobalViewTotal(null);
     setPatches({});
     setUndoStack([]);
     setRedoStack([]);
     setSortRules([]);
     setFilterRules([]);
+    setClearedRows(new Set());
+    setClearedCols(new Set());
+    setHiddenCols(new Set());
+    setColumnSearch("");
+    setColumnOrder([]);
     resetOps();
     resetFileOps();
     clearSelection();
     setEditingCell(null);
     setTotalRows(null);
+    setFileSizeBytes(null);
     setWindowStart(0);
     setWindowSize(400);
     setRowHeight(28);
     setRowHeightOverrides({});
+    setRowIndexMap(null);
     setIndexJobId(null);
     setIndexRunning(false);
     setIndexProgress(0);
     setIndexCanceled(false);
-  }, [clearSelection, resetFileOps, resetOps]);
+    resetWindowCaches();
+  }, [clearSelection, releaseGlobalView, resetFileOps, resetOps, resetWindowCaches]);
 
   const startColumnResize = (index: number, clientX: number) => {
     const startWidth = columnWidths[index] ?? 140;
@@ -795,7 +1560,7 @@ function App() {
   };
 
   useEffect(() => {
-    const handleMove = (event: MouseEvent) => {
+    const handleMove = (event: globalThis.MouseEvent) => {
       const state = resizeStateRef.current;
       if (!state) return;
       if (state.type === "col") {
@@ -954,54 +1719,89 @@ function App() {
 
   const loadWindow = useCallback(
     async (start: number, pathOverride?: string, delimiterOverride?: string, reqId?: number) => {
-      const path = pathOverride ?? preview?.path ?? activePath;
-      if (!path) return;
+      const path = pathOverride ?? preview?.path ?? activePath ?? undefined;
+      if (!path && !globalViewIdRef.current) return;
+      bumpDiagnostics((current) => ({
+        ...current,
+        loadCalls: current.loadCalls + 1,
+        lastStart: start,
+        lastAction: "load-window",
+      }));
 
       const currentReqId = reqId ?? requestIdRef.current;
       if (currentReqId !== requestIdRef.current) return;
 
       const resolvedDelimiter =
         delimiterOverride ?? delimiterApplied ?? preview?.delimiter ?? delimiter;
+      const viewId = globalViewIdRef.current;
       setWindowLoading(true);
       windowLoadingRef.current = true;
       if (
         prefetchRef.current &&
-        (prefetchRef.current.path !== path || prefetchRef.current.delimiter !== resolvedDelimiter)
+        (prefetchRef.current.viewId !== viewId ||
+          prefetchRef.current.path !== path ||
+          prefetchRef.current.delimiter !== resolvedDelimiter)
       ) {
         prefetchRef.current = null;
         prefetchUpRef.current = null;
       }
       try {
-        const slice = await invoke<{
-          rows: string[][];
-          start: number;
-          end: number;
-          eof: boolean;
-        }>("read_csv_rows_window", {
-          path,
-          delimiter: resolvedDelimiter,
-          start,
-          limit: windowSize,
-        });
+        const slice = viewId
+          ? await invoke<{
+              rows: string[][];
+              start: number;
+              end: number;
+              eof: boolean;
+              row_indices?: number[];
+            }>("read_global_view_rows", {
+              viewId,
+              start,
+              limit: windowSize,
+            })
+          : await invoke<{
+              rows: string[][];
+              start: number;
+              end: number;
+              eof: boolean;
+              row_indices?: number[];
+            }>("read_csv_rows_window", {
+              path,
+              delimiter: resolvedDelimiter,
+              start,
+              limit: windowSize,
+            });
 
         // Race condition check: if a newer request started, ignore this result
         if (requestIdRef.current !== currentReqId) return;
 
-        setRows(slice.rows);
+        const normalizedRows = applyColumnOpsToRows(slice.rows);
+        setRows(normalizedRows);
         setWindowStart(slice.start);
         setEof(slice.eof);
-        estimateWindowSize(slice.rows);
+        bumpDiagnostics((current) => ({
+          ...current,
+          lastRows: normalizedRows.length,
+          lastEof: slice.eof,
+          lastStart: slice.start,
+          lastAction: "load-success",
+        }));
+        setRowIndexMap(slice.row_indices ?? null);
+        estimateWindowSize(normalizedRows);
         if (!slice.eof) {
           const nextStart = slice.start + slice.rows.length;
-          schedulePrefetch(nextStart, path, resolvedDelimiter, "down");
+          schedulePrefetch(nextStart, path, resolvedDelimiter, "down", viewId);
         }
         if (slice.start > 0) {
           const prevStart = Math.max(slice.start - windowSize, 0);
-          schedulePrefetch(prevStart, path, resolvedDelimiter, "up");
+          schedulePrefetch(prevStart, path, resolvedDelimiter, "up", viewId);
         }
       } catch (err) {
         if (requestIdRef.current === currentReqId) {
           setError(String(err));
+          bumpDiagnostics((current) => ({
+            ...current,
+            lastAction: "load-error",
+          }));
         }
       } finally {
         if (requestIdRef.current === currentReqId) {
@@ -1013,43 +1813,62 @@ function App() {
     [
       preview,
       activePath,
+      bumpDiagnostics,
       delimiterApplied,
       delimiter,
       windowSize,
       setRows,
       setEof,
       estimateWindowSize,
+      applyColumnOpsToRows,
     ],
   );
 
   const prefetchWindow = useCallback(
     async (
       start: number,
-      path: string,
+      path: string | undefined,
       resolvedDelimiter: string,
       direction: "down" | "up",
+      viewId?: number | null,
     ) => {
       if (prefetchingRef.current) return;
-      if (totalRowCount !== null && start >= totalRowCount) return;
+      if (effectiveTotalRows !== null && start >= effectiveTotalRows) return;
+      if (!viewId && !path) return;
       prefetchingRef.current = true;
       try {
-        const slice = await invoke<{
-          rows: string[][];
-          start: number;
-          end: number;
-          eof: boolean;
-        }>("read_csv_rows_window", {
-          path,
-          delimiter: resolvedDelimiter,
-          start,
-          limit: windowSize,
-        });
+        const slice = viewId
+          ? await invoke<{
+              rows: string[][];
+              start: number;
+              end: number;
+              eof: boolean;
+              row_indices?: number[];
+            }>("read_global_view_rows", {
+              viewId,
+              start,
+              limit: windowSize,
+            })
+          : await invoke<{
+              rows: string[][];
+              start: number;
+              end: number;
+              eof: boolean;
+              row_indices?: number[];
+            }>("read_csv_rows_window", {
+              path,
+              delimiter: resolvedDelimiter,
+              start,
+              limit: windowSize,
+            });
         const payload = {
           start: slice.start,
-          rows: slice.rows,
+          rows: applyColumnOpsToRows(slice.rows),
           eof: slice.eof,
           path,
           delimiter: resolvedDelimiter,
+          rowIndices: slice.row_indices ?? null,
+          viewId: viewId ?? null,
         };
         if (direction === "down") {
           prefetchRef.current = payload;
@@ -1060,11 +1879,18 @@ function App() {
         prefetchingRef.current = false;
       }
     },
-    [totalRowCount, windowSize],
+    [effectiveTotalRows, windowSize, applyColumnOpsToRows],
   );
 
   const schedulePrefetch = useCallback(
-    (start: number, path: string, resolvedDelimiter: string, direction: "down" | "up") => {
+    (
+      start: number,
+      path: string | undefined,
+      resolvedDelimiter: string,
+      direction: "down" | "up",
+      viewId?: number | null,
+    ) => {
+      if (!PREFETCH_ENABLED) return;
       if (prefetchTimerRef.current !== null) {
         window.clearTimeout(prefetchTimerRef.current);
         prefetchTimerRef.current = null;
@@ -1073,25 +1899,39 @@ function App() {
         prefetchTimerRef.current = window.setTimeout(() => {
           prefetchTimerRef.current = null;
           if (!windowLoadingRef.current) {
-            void prefetchWindow(start, path, resolvedDelimiter, direction);
+            void prefetchWindow(start, path, resolvedDelimiter, direction, viewId);
           }
         }, 160);
         return;
       }
-      void prefetchWindow(start, path, resolvedDelimiter, direction);
+      void prefetchWindow(start, path, resolvedDelimiter, direction, viewId);
     },
     [prefetchWindow],
   );
 
   const requestWindow = useCallback(
     async (start: number, pathOverride?: string, delimiterOverride?: string) => {
-      const path = pathOverride ?? preview?.path ?? activePath;
-      if (!path) return;
+      const path = pathOverride ?? preview?.path ?? activePath ?? undefined;
+      if (!path && !globalViewIdRef.current) {
+        bumpDiagnostics((current) => ({
+          ...current,
+          lastAction: "request-skip-no-path",
+        }));
+        return;
+      }
+      bumpDiagnostics((current) => ({
+        ...current,
+        requestCalls: current.requestCalls + 1,
+        lastStart: start,
+        lastAction: "request-window",
+      }));
       const resolvedDelimiter =
         delimiterOverride ?? delimiterApplied ?? preview?.delimiter ?? delimiter;
+      const viewId = globalViewIdRef.current;
       const matchCache = (cache: typeof prefetchRef.current) =>
         cache &&
         cache.start === start &&
+        cache.viewId === viewId &&
         cache.path === path &&
         cache.delimiter === resolvedDelimiter;
 
@@ -1118,20 +1958,40 @@ function App() {
         setRows(cached.rows);
         setWindowStart(cached.start);
         setEof(cached.eof);
+        bumpDiagnostics((current) => ({
+          ...current,
+          cacheHits: current.cacheHits + 1,
+          lastStart: cached.start,
+          lastRows: cached.rows.length,
+          lastEof: cached.eof,
+          lastAction: "request-cache-hit",
+        }));
+        setRowIndexMap(cached.rowIndices ?? null);
         estimateWindowSize(cached.rows);
         if (!cached.eof) {
           const nextStart = cached.start + cached.rows.length;
-          schedulePrefetch(nextStart, path, resolvedDelimiter, "down");
+          schedulePrefetch(nextStart, path, resolvedDelimiter, "down", viewId);
         }
         if (cached.start > 0) {
           const prevStart = Math.max(cached.start - windowSize, 0);
-          schedulePrefetch(prevStart, path, resolvedDelimiter, "up");
+          schedulePrefetch(prevStart, path, resolvedDelimiter, "up", viewId);
         }
         return;
       }
 
+      // If nothing is loaded yet, skip debounce and load immediately.
+      if (!rows.length && !windowLoadingRef.current) {
+        bumpDiagnostics((current) => ({
+          ...current,
+          lastAction: "request-immediate",
+        }));
+        requestIdRef.current += 1;
+        await loadWindow(start, path, resolvedDelimiter, requestIdRef.current);
+        return;
+      }
+
       // 2. Pend the request
-      pendingWindowRef.current = { start, path, delimiter: resolvedDelimiter };
+      pendingWindowRef.current = { start, path, delimiter: resolvedDelimiter, viewId };
 
       // 3. Clear existing debounce
       if (debounceTimerRef.current !== null) {
@@ -1157,30 +2017,308 @@ function App() {
         void fireRequest();
       }, 80);
     },
-    [activePath, preview, delimiterApplied, delimiter, loadWindow, estimateWindowSize, prefetchWindow, windowSize, schedulePrefetch],
+    [
+      activePath,
+      preview,
+      delimiterApplied,
+      delimiter,
+      bumpDiagnostics,
+      loadWindow,
+      estimateWindowSize,
+      prefetchWindow,
+      windowSize,
+      schedulePrefetch,
+      rows.length,
+    ],
+  );
+
+  const handleBodyScroll = useCallback(
+    (event: UIEvent<HTMLDivElement>) => {
+      if (fileMode !== "csv") return;
+      const target = event.currentTarget;
+      const scrollTop = target.scrollTop;
+      const viewHeight = target.clientHeight;
+      const totalSize = rowVirtualizer.getTotalSize();
+      bumpDiagnostics((current) => ({
+        ...current,
+        scrollEvents: current.scrollEvents + 1,
+        lastScrollTop: scrollTop,
+        lastTotalSize: totalSize,
+        lastAction: "scroll",
+      }));
+      if (windowLoadingRef.current) {
+        bumpDiagnostics((current) => ({
+          ...current,
+          blockedLoading: current.blockedLoading + 1,
+          lastAction: "scroll-blocked-loading",
+        }));
+        return;
+      }
+      if (suppressAutoLoadRef.current) {
+        bumpDiagnostics((current) => ({
+          ...current,
+          blockedSuppress: current.blockedSuppress + 1,
+          lastAction: "scroll-blocked-suppress",
+        }));
+        return;
+      }
+      if (!rows.length) {
+        bumpDiagnostics((current) => ({
+          ...current,
+          lastAction: "scroll-no-rows",
+        }));
+        return;
+      }
+      if (!Number.isFinite(totalSize) || totalSize <= 0) return;
+      const threshold = rowHeight * 6;
+
+      if (scrollTop + viewHeight >= totalSize - threshold) {
+        if (eof) {
+          bumpDiagnostics((current) => ({
+            ...current,
+            blockedEof: current.blockedEof + 1,
+            lastAction: "scroll-blocked-eof",
+          }));
+          return;
+        }
+        const nextStart = windowStart + rows.length;
+        if (effectiveTotalRows === null || nextStart < effectiveTotalRows) {
+          if (lastAutoRequestRef.current !== nextStart) {
+            lastAutoRequestRef.current = nextStart;
+            bumpDiagnostics((current) => ({
+              ...current,
+              autoDown: current.autoDown + 1,
+              lastStart: nextStart,
+              lastAction: "auto-down",
+            }));
+            void requestWindow(nextStart);
+          } else {
+            bumpDiagnostics((current) => ({
+              ...current,
+              blockedDuplicate: current.blockedDuplicate + 1,
+              lastAction: "scroll-blocked-dup-down",
+            }));
+          }
+        } else {
+          bumpDiagnostics((current) => ({
+            ...current,
+            lastAction: "scroll-blocked-down-bound",
+          }));
+        }
+      } else if (scrollTop <= threshold && windowStart > 0) {
+        const prevStart = Math.max(windowStart - rows.length, 0);
+        if (lastAutoRequestRef.current !== prevStart) {
+          lastAutoRequestRef.current = prevStart;
+          bumpDiagnostics((current) => ({
+            ...current,
+            autoUp: current.autoUp + 1,
+            lastStart: prevStart,
+            lastAction: "auto-up",
+          }));
+          void requestWindow(prevStart);
+        } else {
+          bumpDiagnostics((current) => ({
+            ...current,
+            blockedDuplicate: current.blockedDuplicate + 1,
+            lastAction: "scroll-blocked-dup-up",
+          }));
+        }
+      } else {
+        bumpDiagnostics((current) => ({
+          ...current,
+          lastAction: "scroll-middle",
+        }));
+      }
+    },
+    [
+      bumpDiagnostics,
+      effectiveTotalRows,
+      fileMode,
+      eof,
+      requestWindow,
+      rowHeight,
+      rowVirtualizer,
+      rows.length,
+      windowStart,
+    ],
   );
 
   const loadNextWindow = useCallback(async () => {
-    const nextStart = windowStart + rows.length;
-    if (totalRowCount !== null && nextStart >= totalRowCount) return;
-    await requestWindow(nextStart);
-  }, [windowStart, rows.length, totalRowCount, requestWindow]);
-
-  const resetWindowCaches = () => {
-    if (debounceTimerRef.current !== null) {
-      window.clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = null;
+    if (eof) {
+      bumpDiagnostics((current) => ({
+        ...current,
+        blockedEof: current.blockedEof + 1,
+        lastAction: "load-next-blocked-eof",
+      }));
+      return;
     }
-    pendingWindowRef.current = null;
-    prefetchRef.current = null;
-    prefetchUpRef.current = null;
-  };
+    const nextStart = windowStart + rows.length;
+    if (effectiveTotalRows !== null && nextStart >= effectiveTotalRows) {
+      bumpDiagnostics((current) => ({
+        ...current,
+        lastAction: "load-next-blocked-bound",
+      }));
+      return;
+    }
+    bumpDiagnostics((current) => ({
+      ...current,
+      autoDown: current.autoDown + 1,
+      lastStart: nextStart,
+      lastAction: "load-next",
+    }));
+    await requestWindow(nextStart);
+  }, [windowStart, rows.length, effectiveTotalRows, requestWindow, eof, bumpDiagnostics]);
+
+  useEffect(() => {
+    const clearRebuildTimer = () => {
+      if (globalViewRebuildTimerRef.current !== null) {
+        window.clearTimeout(globalViewRebuildTimerRef.current);
+        globalViewRebuildTimerRef.current = null;
+      }
+    };
+    clearRebuildTimer();
+
+    if (fileMode !== "csv") {
+      globalViewBuildPendingRef.current = false;
+      return;
+    }
+    if (!hasSortFilter) {
+      globalViewBuildRef.current += 1;
+      globalViewBuildPendingRef.current = false;
+      globalViewBuildRunningRef.current = false;
+      if (globalViewIdRef.current) {
+        const prev = globalViewIdRef.current;
+        globalViewIdRef.current = null;
+        setGlobalViewTotal(null);
+        setRowIndexMap(null);
+        void releaseGlobalView(prev);
+        resetWindowCaches();
+        if (preview?.path) {
+          void requestWindow(0, preview.path, delimiterApplied ?? delimiter);
+        }
+      }
+      setGlobalViewLoading(false);
+      return;
+    }
+
+    if (!preview?.path) return;
+
+    globalViewBuildPendingRef.current = true;
+
+    const scheduleBuild = (delay: number) => {
+      if (globalViewRebuildTimerRef.current !== null) return;
+      globalViewRebuildTimerRef.current = window.setTimeout(() => {
+        globalViewRebuildTimerRef.current = null;
+        if (!globalViewBuildPendingRef.current) return;
+        if (globalViewBuildRunningRef.current) {
+          scheduleBuild(120);
+          return;
+        }
+
+        globalViewBuildPendingRef.current = false;
+        const buildId = ++globalViewBuildRef.current;
+
+        const build = async () => {
+          const sortRulesParsed = sortRules.map((rule) => {
+            const column = Number.parseInt(rule.column, 10);
+            if (Number.isNaN(column) || column < 0) {
+              throw new Error(
+                t("Sort column must be a non-negative number.", "排序列必须是非负数字。"),
+              );
+            }
+            return { column, direction: rule.direction };
+          });
+
+          const filterRulesParsed = filterRules.map((rule) => {
+            const column = Number.parseInt(rule.column, 10);
+            if (Number.isNaN(column) || column < 0) {
+              throw new Error(
+                t("Filter column must be a non-negative number.", "筛选列必须是非负数字。"),
+              );
+            }
+            return { column, value: rule.value };
+          });
+
+          const patchList = Object.entries(patches).map(([key, value]) => {
+            const [row, col] = key.split(":").map(Number);
+            return { row, col, value };
+          });
+
+          const result = await invoke<{ view_id: number; total_rows: number }>(
+            "build_global_view",
+            {
+              path: preview.path,
+              delimiter: delimiterApplied ?? delimiter,
+              sortRules: sortRulesParsed,
+              filterRules: filterRulesParsed,
+              patches: patchList,
+              rowOps,
+              columnOps,
+              clearRows: Array.from(clearedRows),
+              clearCols: Array.from(clearedCols),
+              memoryLimitMb: sortFilterMemoryLimitMb,
+            },
+          );
+
+          if (buildId !== globalViewBuildRef.current) return;
+
+          const prev = globalViewIdRef.current;
+          globalViewIdRef.current = result.view_id;
+          setGlobalViewTotal(result.total_rows);
+          resetWindowCaches();
+          await requestWindow(0);
+          if (prev && prev !== result.view_id) {
+            void releaseGlobalView(prev);
+          }
+        };
+
+        globalViewBuildRunningRef.current = true;
+        setError(null);
+        setGlobalViewLoading(true);
+        build()
+          .catch((err) => {
+            if (buildId !== globalViewBuildRef.current) return;
+            setError(String(err));
+          })
+          .finally(() => {
+            globalViewBuildRunningRef.current = false;
+            if (buildId === globalViewBuildRef.current) {
+              setGlobalViewLoading(false);
+            }
+            if (globalViewBuildPendingRef.current) {
+              scheduleBuild(120);
+            }
+          });
+      }, delay);
+    };
+
+    scheduleBuild(GLOBAL_VIEW_REBUILD_DEBOUNCE_MS);
+    return clearRebuildTimer;
+  }, [
+    fileMode,
+    hasSortFilter,
+    sortRules,
+    filterRules,
+    globalViewPatchTick,
+    rowOps,
+    columnOps,
+    clearedRows,
+    clearedCols,
+    preview?.path,
+    delimiterApplied,
+    delimiter,
+    sortFilterMemoryLimitMb,
+    requestWindow,
+    resetWindowCaches,
+    releaseGlobalView,
+    t,
+  ]);
 
   // Tab data management helpers
   const saveCurrentTabData = useCallback((tabId: string, type: "csv" | "text") => {
     if (type === "csv") {
       const csvData: TabFileData["csvData"] = {
-        rows,
+        rows: rows.slice(0, TAB_ROW_SNAPSHOT_LIMIT),
         headers,
         delimiter,
         delimiterApplied,
@@ -1194,14 +2332,18 @@ function App() {
         rowHeaderWidth,
         rowHeight,
         headerHeightOverride,
-        rowHeightOverrides,
-        autoFitColumns,
-        totalRows: totalRowCount,
+    rowHeightOverrides,
+    autoFitColumns,
+    hiddenCols: Array.from(hiddenCols),
+    totalRows,
         preview,
         activePath,
-        rowOps,
-        columnOps,
-      };
+    rowOps,
+    columnOps,
+    clearedRows: Array.from(clearedRows),
+    clearedCols: Array.from(clearedCols),
+    columnOrder,
+  };
       setTabDataMap((prev) => {
         const next = new Map(prev);
         next.set(tabId, { fileType: "csv", csvData });
@@ -1212,6 +2354,7 @@ function App() {
         content: textContent,
         dirty: textDirty,
         path: textPath || "",
+        encoding: textEncoding,
       };
       setTabDataMap((prev) => {
         const next = new Map(prev);
@@ -1223,7 +2366,7 @@ function App() {
     rows, headers, delimiter, delimiterApplied, windowStart, windowSize, eof,
     patches, undoStack, redoStack, columnWidths, rowHeaderWidth, rowHeight,
     headerHeightOverride, rowHeightOverrides, autoFitColumns, totalRowCount,
-    preview, activePath, rowOps, columnOps, textContent, textDirty, textPath,
+    preview, activePath, rowOps, columnOps, clearedRows, clearedCols, hiddenCols, columnOrder, textContent, textDirty, textPath, textEncoding,
   ]);
 
   const loadTabData = useCallback(async (tabId: string) => {
@@ -1239,6 +2382,12 @@ function App() {
       setRedoStack(csv.redoStack);
       setRowOps(csv.rowOps ?? []);
       setColumnOps(csv.columnOps ?? []);
+      setClearedRows(new Set(csv.clearedRows ?? []));
+      setClearedCols(new Set(csv.clearedCols ?? []));
+      setHiddenCols(new Set(csv.hiddenCols ?? []));
+      if (csv.columnOrder) {
+        setColumnOrder(csv.columnOrder);
+      }
       setColumnWidths(csv.columnWidths);
       setRowHeaderWidth(csv.rowHeaderWidth);
       // Enforce minimum row height of 28 to fix squashed rows regression
@@ -1246,7 +2395,12 @@ function App() {
       setHeaderHeightOverride(csv.headerHeightOverride);
       setRowHeightOverrides(csv.rowHeightOverrides);
       setAutoFitColumns(csv.autoFitColumns);
-      setTotalRows(csv.totalRows);
+      const loadedCount = csv.windowStart + (csv.rows?.length ?? 0);
+      if (csv.totalRows !== null && csv.totalRows >= loadedCount) {
+        setTotalRows(csv.totalRows);
+      } else {
+        setTotalRows(null);
+      }
       resetWindowCaches();
       if (csv.activePath) {
         await closeSession();
@@ -1265,6 +2419,9 @@ function App() {
       setTextPath(txt.path || null);
       setTextContentState(txt.content);
       setTextDirty(txt.dirty);
+      if (txt.encoding) {
+        setTextEncoding(txt.encoding);
+      }
     }
   }, [
     tabDataMap,
@@ -1356,6 +2513,8 @@ function App() {
     if (fileMode !== "csv") return false;
     const result = await saveAs();
     if (!result) return false;
+    clearDraftForPath(preview?.path ?? null);
+    clearDraftForPath(result.path);
     updateActiveTabPath(result.path);
     resetSessionState();
     await closeSession();
@@ -1363,7 +2522,9 @@ function App() {
     if (!info) return false;
     setFileMode("csv");
     await requestWindow(0, info.path, info.delimiter);
-    void refreshTotalRows(info.path, info.delimiter);
+    if (fileSizeBytes !== null && fileSizeBytes <= AUTO_INDEX_THRESHOLD_BYTES) {
+      void refreshTotalRows(info.path, info.delimiter);
+    }
     if (activeTabId) {
       saveCurrentTabData(activeTabId, "csv");
     }
@@ -1380,6 +2541,8 @@ function App() {
     saveCurrentTabData,
     saveTextAs,
     updateActiveTabPath,
+    clearDraftForPath,
+    preview?.path,
   ]);
 
   const handleApplyDelimiter = async () => {
@@ -1388,7 +2551,95 @@ function App() {
     if (!info) return;
     resetSessionState();
     await requestWindow(0, info.path, info.delimiter);
-    void refreshTotalRows(info.path, info.delimiter);
+    if (fileSizeBytes !== null && fileSizeBytes <= AUTO_INDEX_THRESHOLD_BYTES) {
+      void refreshTotalRows(info.path, info.delimiter);
+    }
+  };
+
+  useEffect(() => {
+    const pending = pendingInitialSaveRef.current;
+    if (!pending) return;
+    if (activeTabId !== pending.tabId) return;
+    if (pending.type === "csv") {
+      if (fileMode !== "csv" || loading) return;
+      saveCurrentTabData(pending.tabId, "csv");
+      pendingInitialSaveRef.current = null;
+      return;
+    }
+    if (pending.type === "text") {
+      if (fileMode !== "text" || textLoading) return;
+      saveCurrentTabData(pending.tabId, "text");
+      pendingInitialSaveRef.current = null;
+    }
+  }, [
+    activeTabId,
+    fileMode,
+    loading,
+    rows,
+    headers,
+    textContent,
+    textEncoding,
+    textLoading,
+    textPath,
+    saveCurrentTabData,
+  ]);
+
+
+
+  useEffect(() => {
+    if (fileMode !== "csv" || !preview?.path) return;
+    if (draftSaveTimerRef.current) {
+      window.clearTimeout(draftSaveTimerRef.current);
+    }
+    draftSaveTimerRef.current = window.setTimeout(() => {
+      const hasEdits =
+        Object.keys(patches).length > 0 || clearedRows.size > 0 || clearedCols.size > 0;
+      if (!hasEdits) {
+        clearDraftForPath(preview.path);
+        return;
+      }
+      try {
+        const payload = JSON.stringify({
+          patches,
+          clearedRows: Array.from(clearedRows),
+          clearedCols: Array.from(clearedCols),
+          updatedAt: Date.now(),
+        });
+        window.localStorage.setItem(getDraftKey(preview.path), payload);
+      } catch {
+        // ignore storage failures (quota, serialization)
+      }
+    }, 1800);
+    return () => {
+      if (draftSaveTimerRef.current) {
+        window.clearTimeout(draftSaveTimerRef.current);
+        draftSaveTimerRef.current = null;
+      }
+    };
+  }, [
+    fileMode,
+    preview?.path,
+    patches,
+    clearedRows,
+    clearedCols,
+    clearDraftForPath,
+    getDraftKey,
+  ]);
+
+  const handleRunMacro = () => {
+    if (macroScope === "file") {
+      void runMacroOnFile();
+      return;
+    }
+    runMacro();
+  };
+
+  const handleApplyFindReplace = () => {
+    if (findScope === "file") {
+      void runFindReplaceOnFile();
+      return;
+    }
+    applyFindReplace();
   };
 
   const clearEdits = () => {
@@ -1397,9 +2648,383 @@ function App() {
     setRedoStack([]);
     resetOps();
     resetFileOps();
+    setClearedRows(new Set());
+    setClearedCols(new Set());
     setEditingCell(null);
     setError(null);
+    if (preview?.path) {
+      clearDraftForPath(preview.path);
+    }
+    if (hasSortFilter) {
+      setGlobalViewPatchTick((current) => current + 1);
+    }
   };
+
+  const resolveRowTarget = (allowEnd: boolean) => {
+    if (rowIndexInput.trim() !== "") {
+      const parsed = Number.parseInt(rowIndexInput, 10);
+      if (!Number.isNaN(parsed) && parsed >= 0) return parsed;
+    }
+    const range = getActiveRange();
+    if (range) {
+      return Math.min(range.startRow, range.endRow);
+    }
+    return allowEnd ? rows.length : null;
+  };
+
+  const parseColumnIndex = (allowEnd: boolean) => {
+    if (columnIndexInput.trim() === "") return null;
+    const parsed = Number.parseInt(columnIndexInput, 10);
+    if (Number.isNaN(parsed) || parsed < 0) return null;
+    if (allowEnd && parsed > headers.length) return null;
+    if (!allowEnd && parsed >= headers.length) return null;
+    return parsed;
+  };
+
+  const shiftClearedRowsOnInsert = (index: number) => {
+    setClearedRows((current) => {
+      const next = new Set<number>();
+      current.forEach((value) => {
+        next.add(value >= index ? value + 1 : value);
+      });
+      return next;
+    });
+  };
+
+  const shiftClearedRowsOnDelete = (index: number) => {
+    setClearedRows((current) => {
+      const next = new Set<number>();
+      current.forEach((value) => {
+        if (value === index) return;
+        next.add(value > index ? value - 1 : value);
+      });
+      return next;
+    });
+  };
+
+  const shiftClearedColsOnInsert = (index: number) => {
+    setClearedCols((current) => {
+      const next = new Set<number>();
+      current.forEach((value) => {
+        next.add(value >= index ? value + 1 : value);
+      });
+      return next;
+    });
+  };
+
+  const shiftClearedColsOnDelete = (index: number) => {
+    setClearedCols((current) => {
+      const next = new Set<number>();
+      current.forEach((value) => {
+        if (value === index) return;
+        next.add(value > index ? value - 1 : value);
+      });
+      return next;
+    });
+  };
+
+  const captureRowValues = (rowIndex: number) =>
+    new Array(dataColumnCount).fill("").map((_, col) => getCellValue(rowIndex, col));
+
+  const captureColumnValues = (colIndex: number) => {
+    const values: Array<{ row: number; value: string }> = [];
+    for (let offset = 0; offset < rows.length; offset += 1) {
+      const rowIndex = windowStart + offset;
+      const value = getCellValue(rowIndex, colIndex);
+      if (value !== "") {
+        values.push({ row: rowIndex, value });
+      }
+    }
+    return values;
+  };
+
+  const insertRowWithUndo = (index: number, values?: string[]) => {
+    const resolvedValues = values ?? new Array(dataColumnCount).fill("");
+    shiftClearedRowsOnInsert(index);
+    insertRowAtIndex(index, resolvedValues);
+    pushUndo({ kind: "row_insert", index, values: resolvedValues });
+  };
+
+  const deleteRowWithUndo = (index: number) => {
+    const values = captureRowValues(index);
+    const wasCleared = clearedRows.has(index);
+    shiftClearedRowsOnDelete(index);
+    deleteRowAtIndex(index);
+    pushUndo({ kind: "row_delete", index, values, wasCleared });
+  };
+
+  const insertColumnWithUndo = (index: number, name?: string) => {
+    const resolvedName =
+      name?.trim() || t(`Column ${headers.length + 1}`, `列 ${headers.length + 1}`);
+    shiftClearedColsOnInsert(index);
+    insertColumnAtIndex(index, resolvedName);
+    pushUndo({ kind: "col_insert", index, name: resolvedName });
+  };
+
+  const deleteColumnWithUndo = (index: number) => {
+    const name = headers[index] ?? "";
+    const values = captureColumnValues(index);
+    const wasCleared = clearedCols.has(index);
+    shiftClearedColsOnDelete(index);
+    deleteColumnAtIndex(index);
+    pushUndo({ kind: "col_delete", index, name, values, wasCleared });
+  };
+
+  const renameColumnWithUndo = (index: number, name: string) => {
+    if (index < 0 || index >= headers.length) {
+      setError(t("Column index is invalid for rename.", "重命名时列索引无效。"));
+      return;
+    }
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setError(t("Column name is required for rename.", "重命名需要列名。"));
+      return;
+    }
+    const prev = headers[index] ?? "";
+    if (prev === trimmed) return;
+    renameColumnAtIndex(index, trimmed);
+    pushUndo({ kind: "col_rename", index, prev, next: trimmed });
+  };
+
+  const handleInsertRow = () => {
+    const target = resolveRowTarget(true);
+    if (target === null) {
+      insertRow();
+      return;
+    }
+    insertRowWithUndo(target);
+  };
+
+  const handleDeleteRow = () => {
+    const target = resolveRowTarget(false);
+    if (target === null) {
+      deleteRow();
+      return;
+    }
+    deleteRowWithUndo(target);
+  };
+
+  const handleInsertColumn = () => {
+    const index = parseColumnIndex(true);
+    if (index === null) {
+      insertColumn();
+      return;
+    }
+    insertColumnWithUndo(index, columnNameInput);
+  };
+
+  const handleDeleteColumn = () => {
+    const index = parseColumnIndex(false);
+    if (index === null) {
+      deleteColumn();
+      return;
+    }
+    deleteColumnWithUndo(index);
+  };
+
+  const handleRenameColumn = () => {
+    const index = parseColumnIndex(false);
+    if (index === null) {
+      renameColumn();
+      return;
+    }
+    renameColumnWithUndo(index, columnNameInput);
+  };
+
+  const handleRowHeaderContextMenu = (rowIndex: number, event: ReactMouseEvent) => {
+    event.stopPropagation();
+    if (loading || globalViewLoading || hasSortFilter) return;
+    setContextMenu({ type: "row", index: rowIndex, x: event.clientX, y: event.clientY });
+  };
+
+  const handleColumnHeaderContextMenu = (colIndex: number, event: ReactMouseEvent) => {
+    event.stopPropagation();
+    if (loading || globalViewLoading || hasSortFilter) return;
+    setContextMenu({ type: "col", index: colIndex, x: event.clientX, y: event.clientY });
+  };
+
+  const startHeaderEditing = (colIndex: number) => {
+    if (loading || globalViewLoading || hasSortFilter) return;
+    setEditingHeader({ index: colIndex, value: headers[colIndex] ?? "" });
+  };
+
+  const commitHeaderEditing = () => {
+    if (!editingHeader) return;
+    renameColumnWithUndo(editingHeader.index, editingHeader.value);
+    setEditingHeader(null);
+  };
+
+  const cancelHeaderEditing = () => {
+    setEditingHeader(null);
+  };
+
+  const runContextAction = async (action: string) => {
+    if (!contextMenu) return;
+    if (hasSortFilter) {
+      setError(t("Disable sort/filter before editing rows/columns.", "编辑行列前请先关闭排序/筛选。"));
+      setContextMenu(null);
+      return;
+    }
+    if (contextMenu.type === "row") {
+      const index = contextMenu.index;
+      if (action === "insert_above") {
+        insertRowWithUndo(index);
+      }
+      if (action === "insert_below") {
+        insertRowWithUndo(index + 1);
+      }
+      if (action === "duplicate") {
+        const values = new Array(dataColumnCount)
+          .fill("")
+          .map((_, col) => getCellValue(index, col));
+        shiftClearedRowsOnInsert(index + 1);
+        insertRowAtIndex(index + 1, values);
+        setUndoStack((current) => [
+          ...current,
+          { kind: "row_duplicate", index: index + 1, values },
+        ]);
+        setRedoStack([]);
+      }
+      if (action === "clear") {
+        const range = getActiveRange();
+        const start = range ? Math.min(range.startRow, range.endRow) : index;
+        const end = range ? Math.max(range.startRow, range.endRow) : index;
+        const rowsToAdd: number[] = [];
+        const removedPatches: PatchEntry[] = [];
+        setClearedRows((current) => {
+          const next = new Set(current);
+          for (let row = start; row <= end; row += 1) {
+            if (!next.has(row)) rowsToAdd.push(row);
+            next.add(row);
+          }
+          return next;
+        });
+        setPatches((current) => {
+          const next: Record<string, string> = {};
+          Object.entries(current).forEach(([key, value]) => {
+            const [row] = key.split(":").map(Number);
+            if (row < start || row > end) {
+              next[key] = value;
+            } else {
+              removedPatches.push({ key, value });
+            }
+          });
+          return next;
+        });
+        if (rowsToAdd.length || removedPatches.length) {
+          setUndoStack((current) => [
+            ...current,
+            { kind: "clear_rows", rows: rowsToAdd, patches: removedPatches },
+          ]);
+          setRedoStack([]);
+        }
+      }
+      if (action === "delete") {
+        deleteRowWithUndo(index);
+      }
+    }
+    if (contextMenu.type === "col") {
+      const index = contextMenu.index;
+      if (action === "insert_left") {
+        insertColumnWithUndo(index);
+      }
+      if (action === "insert_right") {
+        insertColumnWithUndo(index + 1);
+      }
+      if (action === "duplicate") {
+        shiftClearedColsOnInsert(index + 1);
+        duplicateColumnAtIndex(index);
+        setUndoStack((current) => [
+          ...current,
+          { kind: "col_duplicate", index },
+        ]);
+        setRedoStack([]);
+      }
+      if (action === "copy_name") {
+        try {
+          await navigator.clipboard.writeText(headers[index] ?? "");
+        } catch (err) {
+          setError(String(err));
+        }
+      }
+      if (action === "clear") {
+        const range = getActiveRange();
+        const start = range ? Math.min(range.startCol, range.endCol) : index;
+        const end = range ? Math.max(range.startCol, range.endCol) : index;
+        const colsToAdd: number[] = [];
+        const removedPatches: PatchEntry[] = [];
+        setClearedCols((current) => {
+          const next = new Set(current);
+          for (let col = start; col <= end; col += 1) {
+            if (!next.has(col)) colsToAdd.push(col);
+            next.add(col);
+          }
+          return next;
+        });
+        setPatches((current) => {
+          const next: Record<string, string> = {};
+          Object.entries(current).forEach(([key, value]) => {
+            const [, col] = key.split(":").map(Number);
+            if (col < start || col > end) {
+              next[key] = value;
+            } else {
+              removedPatches.push({ key, value });
+            }
+          });
+          return next;
+        });
+        if (colsToAdd.length || removedPatches.length) {
+          setUndoStack((current) => [
+            ...current,
+            { kind: "clear_cols", cols: colsToAdd, patches: removedPatches },
+          ]);
+          setRedoStack([]);
+        }
+      }
+      if (action === "delete") {
+        deleteColumnWithUndo(index);
+      }
+      if (action === "rename") startHeaderEditing(index);
+    }
+    setContextMenu(null);
+  };
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handleClick = () => setContextMenu(null);
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setContextMenu(null);
+      }
+    };
+    const handleMenuKey = (event: KeyboardEvent) => {
+      if (!contextMenu) return;
+      const key = event.key.toLowerCase();
+      if (contextMenu.type === "row") {
+        if (key === "a") { event.preventDefault(); runContextAction("insert_above"); }
+        if (key === "b") { event.preventDefault(); runContextAction("insert_below"); }
+        if (key === "d") { event.preventDefault(); runContextAction("duplicate"); }
+        if (key === "c") { event.preventDefault(); runContextAction("clear"); }
+        if (key === "x") { event.preventDefault(); runContextAction("delete"); }
+      } else {
+        if (key === "l") { event.preventDefault(); runContextAction("insert_left"); }
+        if (key === "r") { event.preventDefault(); runContextAction("insert_right"); }
+        if (key === "d") { event.preventDefault(); runContextAction("duplicate"); }
+        if (key === "c") { event.preventDefault(); runContextAction("clear"); }
+        if (key === "n") { event.preventDefault(); runContextAction("copy_name"); }
+        if (key === "e") { event.preventDefault(); runContextAction("rename"); }
+        if (key === "x") { event.preventDefault(); runContextAction("delete"); }
+      }
+    };
+    window.addEventListener("click", handleClick);
+    window.addEventListener("keydown", handleEscape);
+    window.addEventListener("keydown", handleMenuKey);
+    return () => {
+      window.removeEventListener("click", handleClick);
+      window.removeEventListener("keydown", handleEscape);
+      window.removeEventListener("keydown", handleMenuKey);
+    };
+  }, [contextMenu, runContextAction]);
 
   const saveCurrent = useCallback(async (): Promise<boolean> => {
     if (fileMode === "text") {
@@ -1411,11 +3036,14 @@ function App() {
     if (fileMode === "csv" && preview?.path) {
       const saved = await saveToPath(preview.path);
       if (!saved) return false;
+      clearDraftForPath(preview.path);
       setPatches({});
       setUndoStack([]);
       setRedoStack([]);
       resetOps();
       resetFileOps();
+      setClearedRows(new Set());
+      setClearedCols(new Set());
       setEditingCell(null);
       await requestWindow(windowStart, preview.path, delimiterApplied ?? delimiter);
       setTabs((prev) =>
@@ -1442,6 +3070,7 @@ function App() {
     saveTextAs,
     saveTextTo,
     saveToPath,
+    clearDraftForPath,
     textPath,
     windowStart,
   ]);
@@ -1504,6 +3133,7 @@ function App() {
         setRows([]);
         setHeaders([]);
         setPatches({});
+        setRowIndexMap(null);
         resetTextSession();
       }
       return filtered;
@@ -1530,6 +3160,103 @@ function App() {
     void handleOpen();
   }, []);
 
+  const openPath = useCallback(async (path: string) => {
+    const isCsv = path.toLowerCase().endsWith(".csv");
+
+    // Save current tab's data before opening new file
+    if (activeTabId) {
+      const currentTab = tabs.find((tab) => tab.id === activeTabId);
+      if (currentTab) {
+        saveCurrentTabData(activeTabId, currentTab.fileType);
+      }
+    }
+
+    if (isCsv) {
+      resetTextSession();
+      await closeSession();
+      const info = await openCsvPath(path);
+      if (!info) return;
+      setFileMode("csv");
+      resetSessionState();
+      const parsedSkip = Number.parseInt(importSkipRows, 10);
+      const skipRows = Number.isNaN(parsedSkip) ? 0 : Math.max(0, parsedSkip);
+      pendingImportRef.current = { skipRows, firstRowHeader: importFirstRowHeader };
+      await requestWindow(skipRows, path, info.delimiter);
+      try {
+        const fileInfo = await stat(path);
+        setFileSizeBytes(fileInfo.size ?? null);
+        if ((fileInfo.size ?? 0) <= AUTO_INDEX_THRESHOLD_BYTES) {
+          void refreshTotalRows(path, info.delimiter);
+        }
+      } catch {
+        setFileSizeBytes(null);
+      }
+      const draft = loadDraftForPath(path);
+      const hasDraft =
+        draft &&
+        ((draft.patches && Object.keys(draft.patches).length > 0) ||
+          (draft.clearedRows && draft.clearedRows.length > 0) ||
+          (draft.clearedCols && draft.clearedCols.length > 0));
+      if (hasDraft) {
+        const restore = await confirm(
+          t(
+            "Restore unsaved edits from the last session?",
+            "是否恢复上次未保存的编辑？",
+          ),
+          { title: t("Draft detected", "检测到草稿"), kind: "warning" },
+        );
+        if (restore && draft) {
+          setPatches(draft.patches ?? {});
+          setClearedRows(new Set(draft.clearedRows ?? []));
+          setClearedCols(new Set(draft.clearedCols ?? []));
+          setUndoStack([]);
+          setRedoStack([]);
+        } else {
+          clearDraftForPath(path);
+        }
+      }
+      const tabId = createTab(path, "csv");
+      pendingInitialSaveRef.current = { tabId, type: "csv" };
+      addRecentFile(path);
+      return;
+    }
+
+    resetSessionState();
+    await closeSession();
+    const opened = await openText(path);
+    if (!opened) return;
+    setFileMode("text");
+    setFileSizeBytes(null);
+    const tabId = createTab(path, "text");
+    pendingInitialSaveRef.current = { tabId, type: "text" };
+    addRecentFile(path);
+  }, [
+    activeTabId,
+    addRecentFile,
+    clearDraftForPath,
+    closeSession,
+    createTab,
+    importFirstRowHeader,
+    importSkipRows,
+    loadDraftForPath,
+    openCsvPath,
+    openText,
+    refreshTotalRows,
+    requestWindow,
+    resetSessionState,
+    resetTextSession,
+    saveCurrentTabData,
+    setFileSizeBytes,
+    setClearedCols,
+    setClearedRows,
+    setPatches,
+    setRedoStack,
+    setUndoStack,
+    setFileMode,
+    tabs,
+    t,
+  ]);
+
   const handleOpen = async () => {
     if (activeTabId) {
       const currentTab = tabs.find((tab) => tab.id === activeTabId);
@@ -1550,48 +3277,7 @@ function App() {
       });
 
       if (!selected || Array.isArray(selected)) return;
-
-      const path = selected;
-      const isCsv = path.toLowerCase().endsWith(".csv");
-
-      // Save current tab's data before opening new file
-      if (activeTabId) {
-        const currentTab = tabs.find((tab) => tab.id === activeTabId);
-        if (currentTab) {
-          saveCurrentTabData(activeTabId, currentTab.fileType);
-        }
-      }
-
-      if (isCsv) {
-        resetTextSession();
-        await closeSession();
-        const info = await openCsvPath(path);
-        if (!info) return;
-        setFileMode("csv");
-        resetSessionState();
-        await requestWindow(0, path, info.delimiter);
-        void refreshTotalRows(path, info.delimiter);
-        const tabId = createTab(path, "csv");
-
-        // Save initial CSV data for this tab
-        // Note: We need to wait for the next render cycle for state to update
-        setTimeout(() => {
-          saveCurrentTabData(tabId, "csv");
-        }, 100);
-        return;
-      }
-
-      resetSessionState();
-      await closeSession();
-      const opened = await openText(path);
-      if (!opened) return;
-      setFileMode("text");
-      const tabId = createTab(path, "text");
-
-      // Save initial text data for this tab
-      setTimeout(() => {
-        saveCurrentTabData(tabId, "text");
-      }, 100);
+      await openPath(selected);
     } finally {
       openDialogActiveRef.current = false;
     }
@@ -1811,6 +3497,19 @@ function App() {
               {textDirty ? <span className="dirty">{t("(modified)", "(已修改)")}</span> : null}
             </div>
             <div className="text-actions">
+              <label className="text-field">
+                <span>{t("Encoding", "编码")}</span>
+                <select
+                  value={textEncoding}
+                  onChange={(e) => setTextEncoding(e.target.value as "UTF-8" | "UTF-16LE")}
+                >
+                  <option value="UTF-8">UTF-8</option>
+                  <option value="UTF-16LE">UTF-16 LE</option>
+                </select>
+              </label>
+              <button onClick={saveCurrent} disabled={textLoading || (!textDirty && Boolean(textPath))}>
+                {t("Save", "保存")}
+              </button>
               <button onClick={saveTextAs} disabled={textLoading}>
                 {t("Save As", "另存为")}
               </button>
@@ -1881,127 +3580,240 @@ function App() {
             previewDelimiter={preview?.delimiter}
             t={t}
           />
+          {diagnosticsEnabled ? (
+            <section className="diagnostic-panel">
+              <div className="diagnostic-head">
+                <strong>{t("Diagnostics", "诊断")}</strong>
+                <span>{t("Toggle: Ctrl+Shift+D", "切换：Ctrl+Shift+D")}</span>
+                <button onClick={resetDiagnostics}>{t("Reset", "重置")}</button>
+                <button onClick={() => setDiagnosticsEnabled(false)}>{t("Close", "关闭")}</button>
+              </div>
+              <div className="diagnostic-metrics">
+                <span>{t(`scroll ${diagnosticState.scrollEvents}`, `滚动 ${diagnosticState.scrollEvents}`)}</span>
+                <span>{t(`auto-down ${diagnosticState.autoDown}`, `下翻自动加载 ${diagnosticState.autoDown}`)}</span>
+                <span>{t(`auto-up ${diagnosticState.autoUp}`, `上翻自动加载 ${diagnosticState.autoUp}`)}</span>
+                <span>{t(`request ${diagnosticState.requestCalls}`, `请求 ${diagnosticState.requestCalls}`)}</span>
+                <span>{t(`load ${diagnosticState.loadCalls}`, `加载 ${diagnosticState.loadCalls}`)}</span>
+                <span>{t(`cache-hit ${diagnosticState.cacheHits}`, `缓存命中 ${diagnosticState.cacheHits}`)}</span>
+                <span>{t(`blocked-loading ${diagnosticState.blockedLoading}`, `被加载中拦截 ${diagnosticState.blockedLoading}`)}</span>
+                <span>{t(`blocked-suppress ${diagnosticState.blockedSuppress}`, `被抑制拦截 ${diagnosticState.blockedSuppress}`)}</span>
+                <span>{t(`blocked-eof ${diagnosticState.blockedEof}`, `被EOF拦截 ${diagnosticState.blockedEof}`)}</span>
+                <span>{t(`blocked-dup ${diagnosticState.blockedDuplicate}`, `被重复请求拦截 ${diagnosticState.blockedDuplicate}`)}</span>
+                <span>{t(`last-start ${diagnosticState.lastStart ?? "-"}`, `最后起始 ${diagnosticState.lastStart ?? "-"}`)}</span>
+                <span>{t(`last-rows ${diagnosticState.lastRows}`, `最后行数 ${diagnosticState.lastRows}`)}</span>
+                <span>{t(`last-eof ${diagnosticState.lastEof ? "true" : "false"}`, `最后EOF ${diagnosticState.lastEof ? "true" : "false"}`)}</span>
+                <span>{t(`scrollTop ${Math.round(diagnosticState.lastScrollTop)}`, `滚动Top ${Math.round(diagnosticState.lastScrollTop)}`)}</span>
+                <span>{t(`totalSize ${Math.round(diagnosticState.lastTotalSize)}`, `总高度 ${Math.round(diagnosticState.lastTotalSize)}`)}</span>
+                <span>{t(`last-action ${diagnosticState.lastAction}`, `最后动作 ${diagnosticState.lastAction}`)}</span>
+              </div>
+            </section>
+          ) : null}
 
-          <Panels
-            showMacroPanel={showMacroPanel}
-            showOpsPanel={showOpsPanel}
-            showExportPanel={showExportPanel}
-            showFindPanel={showFindPanel}
-            showStatsPanel={showStatsPanel}
-            macroOp={macroOp}
-            macroColumn={macroColumn}
-            macroFind={macroFind}
-            macroReplace={macroReplace}
-            macroText={macroText}
-            macroOutputPath={macroOutputPath}
-            onMacroOpChange={setMacroOp}
-            onMacroColumnChange={setMacroColumn}
-            onMacroFindChange={setMacroFind}
-            onMacroReplaceChange={setMacroReplace}
-            onMacroTextChange={setMacroText}
-            onRunMacro={runMacro}
-            onRunMacroOnFile={runMacroOnFile}
-            rowIndexInput={rowIndexInput}
-            columnIndexInput={columnIndexInput}
-            columnNameInput={columnNameInput}
-            onRowIndexChange={setRowIndexInput}
-            onColumnIndexChange={setColumnIndexInput}
-            onColumnNameChange={setColumnNameInput}
-            onInsertRow={insertRow}
-            onDeleteRow={deleteRow}
+          <div
+            className={`workspace${showDrawer ? " with-drawer" : ""}`}
+            style={showDrawer ? { gridTemplateColumns: `minmax(0, 1fr) ${sidebarWidth}px` } : undefined}
+          >
+            {showDrawer ? (
+              <aside className="panel-drawer">
+                <div className="panel-header">
+                  <span>{t("Panels", "面板")}</span>
+                  <button onClick={() => setDrawerCollapsed(true)}>
+                    {t("Collapse", "收起")}
+                  </button>
+                </div>
+                <div className="panel-resizer" onMouseDown={startSidebarResize} />
+                <Panels
+                  showMacroPanel={showMacroPanel}
+                  showOpsPanel={showOpsPanel}
+                  showExportPanel={showExportPanel}
+                  showFindPanel={showFindPanel}
+                  showStatsPanel={showStatsPanel}
+                  macroOp={macroOp}
+                  macroColumn={macroColumn}
+                  macroFind={macroFind}
+                  macroReplace={macroReplace}
+                  macroText={macroText}
+                  macroScope={macroScope}
+                  macroOutputPath={macroOutputPath}
+                  onMacroOpChange={setMacroOp}
+                  onMacroColumnChange={setMacroColumn}
+                  onMacroFindChange={setMacroFind}
+                  onMacroReplaceChange={setMacroReplace}
+                  onMacroTextChange={setMacroText}
+                  onMacroScopeChange={setMacroScope}
+                  onRunMacro={handleRunMacro}
+                  rowIndexInput={rowIndexInput}
+                  columnIndexInput={columnIndexInput}
+                  columnNameInput={columnNameInput}
+                  onRowIndexChange={setRowIndexInput}
+                  onColumnIndexChange={setColumnIndexInput}
+                  onColumnNameChange={setColumnNameInput}
+                  onInsertRow={handleInsertRow}
+                  onDeleteRow={handleDeleteRow}
             onCopySelection={copySelection}
-            onPasteSelection={pasteSelection}
-            onInsertColumn={insertColumn}
-            onDeleteColumn={deleteColumn}
-            onRenameColumn={renameColumn}
-            sortColumnInput={sortColumnInput}
-            sortDirection={sortDirection}
-            filterColumnInput={filterColumnInput}
-            filterText={filterText}
-            onSortColumnChange={setSortColumnInput}
-            onSortDirectionChange={setSortDirection}
-            onFilterColumnChange={setFilterColumnInput}
-            onFilterTextChange={setFilterText}
-            onAddSortRule={addSortRule}
-            onAddFilterRule={addFilterRule}
-            onClearSortFilter={clearSortFilter}
-            sortRules={sortRules}
-            filterRules={filterRules}
-            onRemoveSortRule={removeSortRule}
-            onRemoveFilterRule={removeFilterRule}
-            encodingMode={encodingMode}
-            eolMode={eolMode}
-            includeBom={includeBom}
-            dialectDelimiter={dialectDelimiter}
-            dialectQuote={dialectQuote}
-            dialectEscape={dialectEscape}
-            onEncodingModeChange={setEncodingMode}
-            onEolModeChange={setEolMode}
-            onIncludeBomChange={setIncludeBom}
-            onDialectDelimiterChange={setDialectDelimiter}
-            onDialectQuoteChange={setDialectQuote}
-            onDialectEscapeChange={setDialectEscape}
-            findText={findText}
-            replaceText={replaceText}
-            findColumnInput={findColumnInput}
-            findStartRow={findStartRow}
-            findEndRow={findEndRow}
-            useRegex={useRegex}
-            matchCase={matchCase}
-            findOutputPath={findOutputPath}
-            onFindTextChange={setFindText}
-            onReplaceTextChange={setReplaceText}
-            onFindColumnChange={setFindColumnInput}
-            onFindStartRowChange={setFindStartRow}
-            onFindEndRowChange={setFindEndRow}
-            onUseRegexChange={setUseRegex}
-            onMatchCaseChange={setMatchCase}
-            onApplyFindReplace={applyFindReplace}
-            onApplyFindReplaceOnFile={runFindReplaceOnFile}
-            columnStats={columnStats}
-            fullStats={fullStats}
-            fullStatsLoading={fullStatsLoading}
-            onRunFullStats={runFullStats}
-            loading={loading}
-            hasPreview={Boolean(preview)}
-            t={t}
-          />
-
-          {error ? <div className="banner error">{error}</div> : null}
-
-          <GridView
-            headers={headers}
-            gridTemplateColumns={gridTemplateColumns}
-            isRowLoaded={isRowLoaded}
-            getRowIndex={getRowIndex}
-            onColumnResizeStart={startColumnResize}
-            onColumnResizeStartAll={startColumnResizeAll}
-            onRowHeaderResizeStart={startRowHeaderResize}
-            onRowHeightResizeStartAll={startRowHeightResizeAll}
-            onRowHeightResizeStartRow={startRowHeightResizeRow}
-            onHeaderRowHeightResizeStart={startHeaderRowHeightResize}
-            rowHeight={rowHeight}
-            headerHeight={headerHeightOverride ?? rowHeight}
-            getRowHeight={getRowHeight}
-            parentRef={parentRef}
-            rowVirtualizer={rowVirtualizer}
-            editingCell={editingCell}
-            patches={patches}
-            getCellValue={getCellValue}
-            startEditing={startEditing}
-            setEditingCell={setEditingCell}
-            commitEditing={commitEditing}
-            cancelEditing={cancelEditing}
-            onClearSelection={clearSelection}
-            isRowInSelection={isRowInSelection}
-            isColInSelection={isColInSelection}
-            isCellInSelection={isCellInSelection}
-            updateSelection={updateSelection}
-            setIsDraggingSelection={setIsDraggingSelection}
-            isDraggingSelection={isDraggingSelection}
-            selectionMode={selectionMode}
-            t={t}
-          />
+                  onPasteSelection={pasteSelection}
+                  pasteMode={pasteMode}
+                  onPasteModeChange={setPasteMode}
+                  columnSearch={columnSearch}
+                  onColumnSearchChange={setColumnSearch}
+                  hiddenCols={Array.from(hiddenCols)}
+                  onToggleColumnHidden={handleToggleColumnHidden}
+                  onShowAllColumns={handleShowAllColumns}
+                  onHideAllColumns={handleHideAllColumns}
+                  onMoveColumnUp={(index) => moveColumnInOrder(index, -1)}
+                  onMoveColumnDown={(index) => moveColumnInOrder(index, 1)}
+                  importSkipRows={importSkipRows}
+                  onImportSkipRowsChange={setImportSkipRows}
+                  importFirstRowHeader={importFirstRowHeader}
+                  onImportFirstRowHeaderChange={setImportFirstRowHeader}
+                  onInsertColumn={handleInsertColumn}
+                  onDeleteColumn={handleDeleteColumn}
+                  onRenameColumn={handleRenameColumn}
+                  sortColumnInput={sortColumnInput}
+                  sortDirection={sortDirection}
+                  filterColumnInput={filterColumnInput}
+                  filterText={filterText}
+                  onSortColumnChange={setSortColumnInput}
+                  onSortDirectionChange={setSortDirection}
+                  onFilterColumnChange={setFilterColumnInput}
+                  onFilterTextChange={setFilterText}
+                  onAddSortRule={addSortRule}
+                  onAddFilterRule={addFilterRule}
+                  onClearSortFilter={clearSortFilter}
+                  sortRules={sortRules}
+                  filterRules={filterRules}
+                  onRemoveSortRule={removeSortRule}
+                  onRemoveFilterRule={removeFilterRule}
+                  encodingMode={encodingMode}
+                  eolMode={eolMode}
+                  includeBom={includeBom}
+                  dialectDelimiter={dialectDelimiter}
+                  dialectQuote={dialectQuote}
+                  dialectEscape={dialectEscape}
+                  onEncodingModeChange={setEncodingMode}
+                  onEolModeChange={setEolMode}
+                  onIncludeBomChange={setIncludeBom}
+                  onDialectDelimiterChange={setDialectDelimiter}
+                  onDialectQuoteChange={setDialectQuote}
+                  onDialectEscapeChange={setDialectEscape}
+                  findText={findText}
+                  replaceText={replaceText}
+                  findScope={findScope}
+                  findColumnInput={findColumnInput}
+                  findStartRow={findStartRow}
+                  findEndRow={findEndRow}
+                  useRegex={useRegex}
+                  matchCase={matchCase}
+                  findOutputPath={findOutputPath}
+                  onFindTextChange={setFindText}
+                  onReplaceTextChange={setReplaceText}
+                  onFindScopeChange={setFindScope}
+                  onFindColumnChange={setFindColumnInput}
+                  onFindStartRowChange={setFindStartRow}
+                  onFindEndRowChange={setFindEndRow}
+                  onUseRegexChange={setUseRegex}
+                  onMatchCaseChange={setMatchCase}
+                  onApplyFindReplace={handleApplyFindReplace}
+                  columnStats={columnStats}
+                  fullStats={fullStats}
+                  fullStatsLoading={fullStatsLoading}
+                  onRunFullStats={runFullStats}
+                  loading={loading || globalViewLoading}
+                  sortFilterActive={hasSortFilter}
+                  sortFilterMemoryLimitMb={sortFilterMemoryLimitMb}
+                  sortFilterMemoryLimitText={sortFilterMemoryLimitText}
+                  onSortFilterMemoryLimitTextChange={setSortFilterMemoryLimitText}
+                  onSortFilterMemoryLimitCommit={(value) => setSortFilterMemoryLimitMb(value)}
+                  columnSelectOptions={columnSelectOptions}
+                  hasPreview={Boolean(preview)}
+                  t={t}
+                />
+              </aside>
+            ) : null}
+            <div className="grid-area">
+              {showPanels && drawerCollapsed ? (
+                <div className="panel-collapsed">
+                  <button onClick={() => setDrawerCollapsed(false)}>
+                    {t("Show panels", "显示面板")}
+                  </button>
+                </div>
+              ) : null}
+              {error ? <div className="banner error">{error}</div> : null}
+              {!preview && !loading ? (
+                <div className="empty-state">
+                  <div className="empty-card">
+                    <h2>{t("Open a CSV or text file to begin", "打开 CSV 或文本文件开始")}</h2>
+                    <p>
+                      {t(
+                        "You can drag and drop a file here or use the open button.",
+                        "可以拖拽文件到此处，或点击打开按钮。",
+                      )}
+                    </p>
+                    <button onClick={handleOpen}>{t("Open file", "打开文件")}</button>
+                    {recentFiles.length ? (
+                      <div className="recent-files">
+                        <div className="recent-title">{t("Recent files", "最近文件")}</div>
+                        <div className="recent-list">
+                          {recentFiles.map((path) => (
+                            <button key={path} onClick={() => void openPath(path)}>
+                              {path}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              ) : (
+                <GridView
+                  headers={gridHeaders}
+                  columnCount={selectionColumnCount}
+                  columnWidths={columnWidths}
+                  rowHeaderWidth={rowHeaderWidth}
+                  gridTemplateColumns={gridTemplateColumns}
+                  isRowLoaded={isRowLoaded}
+                  getRowIndex={getRowIndex}
+                  onColumnResizeStart={startColumnResize}
+                  onColumnResizeStartAll={startColumnResizeAll}
+                  onRowHeaderResizeStart={startRowHeaderResize}
+                  onRowHeightResizeStartAll={startRowHeightResizeAll}
+                  onRowHeightResizeStartRow={startRowHeightResizeRow}
+                  onHeaderRowHeightResizeStart={startHeaderRowHeightResize}
+                  rowHeight={rowHeight}
+                  headerHeight={headerHeightOverride ?? rowHeight}
+                  getRowHeight={getRowHeight}
+                  parentRef={parentRef}
+                  rowVirtualizer={rowVirtualizer}
+                  onBodyScroll={handleBodyScroll}
+                  editingCell={editingCell}
+                  patches={patches}
+                  getCellValue={getCellValue}
+                  startEditing={startEditing}
+                  setEditingCell={setEditingCell}
+                  commitEditing={commitEditing}
+                  cancelEditing={cancelEditing}
+                  onClearSelection={clearSelection}
+                  isRowInSelection={isRowInSelection}
+                  isColInSelection={isColInSelection}
+                  isCellInSelection={isCellInSelection}
+                  activeCell={selectionAnchor}
+                  hiddenCols={hiddenCols}
+                  updateSelection={updateSelection}
+                  setIsDraggingSelection={setIsDraggingSelection}
+                  isDraggingSelection={isDraggingSelection}
+                  selectionMode={selectionMode}
+                  onRowHeaderContextMenu={handleRowHeaderContextMenu}
+                  onColumnHeaderContextMenu={handleColumnHeaderContextMenu}
+                  editingHeader={editingHeader}
+                  setEditingHeader={setEditingHeader}
+                  commitHeaderEditing={commitHeaderEditing}
+                  cancelHeaderEditing={cancelHeaderEditing}
+                  onHeaderDoubleClick={startHeaderEditing}
+                  t={t}
+                />
+              )}
+            </div>
+          </div>
         </section>
       )}
 
@@ -2025,22 +3837,104 @@ function App() {
         </footer>
       ) : (
         <StatusBar
-          loading={loading}
-          loadingRows={windowLoading}
-          hasPreview={Boolean(preview)}
-          eof={eof}
-          rowsLength={rows.length}
-          visibleCount={hasSortFilter ? visibleRowIndices.length : rows.length}
-          patchCount={Object.keys(patches).length}
-          macroAppliedCount={macroAppliedCount}
-          findAppliedCount={findAppliedCount}
-          indexing={indexRunning}
-          indexProgress={indexProgress}
-          indexCanceled={indexCanceled}
-          onCancelIndex={cancelIndexBuild}
-          t={t}
-        />
+        loading={loading}
+        loadingRows={windowLoading}
+        hasPreview={Boolean(preview)}
+        eof={eof}
+        rowsLength={rows.length}
+          visibleCount={rows.length}
+        patchCount={Object.keys(patches).length}
+        macroAppliedCount={macroAppliedCount}
+        findAppliedCount={findAppliedCount}
+        opStatus={opStatus}
+        indexing={indexRunning}
+        indexProgress={indexProgress}
+        indexCanceled={indexCanceled}
+        globalViewLoading={globalViewLoading}
+        canBuildIndex={
+          fileMode === "csv" &&
+          !indexRunning &&
+          totalRows === null &&
+          (fileSizeBytes === null || fileSizeBytes > AUTO_INDEX_THRESHOLD_BYTES)
+        }
+        onBuildIndex={() => {
+          if (preview?.path) {
+            void refreshTotalRows(preview.path, delimiterApplied ?? delimiter);
+          }
+        }}
+        onCancelIndex={cancelIndexBuild}
+        t={t}
+      />
       )}
+
+      {contextMenu ? (
+        <div
+          className="context-menu"
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          {contextMenu.type === "row" ? (
+            <>
+              <button onClick={() => runContextAction("insert_above")}>
+                <span>{t("Insert row above", "在上方插入行")}</span>
+                <span className="context-key">A</span>
+              </button>
+              <button onClick={() => runContextAction("insert_below")}>
+                <span>{t("Insert row below", "在下方插入行")}</span>
+                <span className="context-key">B</span>
+              </button>
+              <div className="context-menu-sep" />
+              <button onClick={() => runContextAction("duplicate")}>
+                <span>{t("Duplicate row", "复制行")}</span>
+                <span className="context-key">D</span>
+              </button>
+              <button onClick={() => runContextAction("clear")}>
+                <span>{t("Clear rows", "清空行")}</span>
+                <span className="context-key">C</span>
+              </button>
+              <div className="context-menu-sep" />
+              <button onClick={() => runContextAction("delete")}>
+                <span>{t("Delete row", "删除行")}</span>
+                <span className="context-key">X</span>
+              </button>
+            </>
+          ) : (
+            <>
+              <button onClick={() => runContextAction("insert_left")}>
+                <span>{t("Insert column left", "在左侧插入列")}</span>
+                <span className="context-key">L</span>
+              </button>
+              <button onClick={() => runContextAction("insert_right")}>
+                <span>{t("Insert column right", "在右侧插入列")}</span>
+                <span className="context-key">R</span>
+              </button>
+              <div className="context-menu-sep" />
+              <button onClick={() => runContextAction("duplicate")}>
+                <span>{t("Duplicate column", "复制列")}</span>
+                <span className="context-key">D</span>
+              </button>
+              <button onClick={() => runContextAction("clear")}>
+                <span>{t("Clear columns", "清空列")}</span>
+                <span className="context-key">C</span>
+              </button>
+              <div className="context-menu-sep" />
+              <button onClick={() => runContextAction("copy_name")}>
+                <span>{t("Copy column name", "复制列名")}</span>
+                <span className="context-key">N</span>
+              </button>
+              <button onClick={() => runContextAction("rename")}>
+                <span>{t("Rename column", "重命名列")}</span>
+                <span className="context-key">E</span>
+              </button>
+              <div className="context-menu-sep" />
+              <button onClick={() => runContextAction("delete")}>
+                <span>{t("Delete column", "删除列")}</span>
+                <span className="context-key">X</span>
+              </button>
+            </>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }

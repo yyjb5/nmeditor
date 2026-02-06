@@ -118,6 +118,7 @@ export default function useSelection(rowCount: number, colCount: number) {
     selectionRanges.some((range) => col >= range.startCol && col <= range.endCol);
 
   return {
+    selectionAnchor,
     selectionRanges,
     selectionMode,
     isDraggingSelection,

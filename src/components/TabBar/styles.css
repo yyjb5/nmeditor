@@ -7,6 +7,9 @@
     overflow-x: auto;
     overflow-y: hidden;
     flex-shrink: 0;
+    position: sticky;
+    top: 0;
+    z-index: 8;
 }
 
 .tab-bar::-webkit-scrollbar {
