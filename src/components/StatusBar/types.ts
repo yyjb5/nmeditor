@@ -1,6 +1,10 @@
 export type StatusBarProps = {
   loading: boolean;
   loadingRows: boolean;
+  fileMode: "none" | "csv" | "text";
+  csvGridFocused: boolean;
+  csvEditing: boolean;
+  csvSelectionMode: "cell" | "row" | "col";
   hasPreview: boolean;
   eof: boolean;
   rowsLength: number;
@@ -12,8 +16,18 @@ export type StatusBarProps = {
   indexing: boolean;
   indexProgress: number;
   indexCanceled: boolean;
+  findRunning: boolean;
+  findProgress: number;
+  findCanceled: boolean;
+  findMatchedCount: number | null;
+  findScannedRows: number | null;
+  findElapsedMs: number | null;
   globalViewLoading: boolean;
+  autoIndexMode: "large_only" | "all";
+  forceExternalSort: boolean;
+  indexingTrigger: "auto" | "manual" | null;
   onCancelIndex?: () => void;
+  onCancelFind?: () => void;
   onBuildIndex?: () => void;
   canBuildIndex?: boolean;
   t: (en: string, zh: string) => string;

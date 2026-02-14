@@ -1,0 +1,20 @@
+.cm-preview-root {
+  width: 100%;
+  min-height: 220px;
+  max-height: 260px;
+  border-top: 1px solid #dbeafe;
+}
+
+.cm-preview-root .cm-editor {
+  height: 100%;
+}
+
+.cm-preview-root .cm-scroller {
+  overflow: auto;
+}
+
+.cm-preview-root .cm-gutters {
+  background: #f8fafc;
+  border-right: 1px solid #e2e8f0;
+  color: #94a3b8;
+}

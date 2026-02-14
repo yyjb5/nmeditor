@@ -87,6 +87,16 @@ const baseProps = {
   useRegex: false,
   matchCase: false,
   findOutputPath: null,
+  findMatches: [],
+  activeFindMatchIndex: -1,
+  findMatchesSource: "loaded" as const,
+  findMatchesHasMore: false,
+  findRunning: false,
+  findProgress: 0,
+  findCanceled: false,
+  findMatchedCount: null,
+  findScannedRows: null,
+  findElapsedMs: null,
   onFindTextChange: () => {},
   onReplaceTextChange: () => {},
   onFindScopeChange: () => {},
@@ -95,6 +105,12 @@ const baseProps = {
   onFindEndRowChange: () => {},
   onUseRegexChange: () => {},
   onMatchCaseChange: () => {},
+  onFindMatches: () => {},
+  onFindPrev: () => {},
+  onFindNext: () => {},
+  onFindClear: () => {},
+  onFindCancel: () => {},
+  onFindJump: () => {},
   onApplyFindReplace: () => {},
   columnStats: [],
   fullStats: null,
@@ -106,6 +122,10 @@ const baseProps = {
   sortFilterMemoryLimitText: "300",
   onSortFilterMemoryLimitTextChange: () => {},
   onSortFilterMemoryLimitCommit: () => {},
+  forceExternalSort: false,
+  onForceExternalSortChange: () => {},
+  autoIndexMode: "large_only" as const,
+  onAutoIndexModeChange: () => {},
   columnSelectOptions: [],
   hasPreview: true,
   t,
@@ -138,5 +158,35 @@ describe("Panels scope toggles", () => {
     expect(screen.getAllByRole("button", { name: "Apply on full file" }).length).toBeGreaterThan(0);
     rerender(<Panels {...baseProps} findScope="loaded" />);
     expect(screen.getAllByRole("button", { name: "Apply find/replace" }).length).toBeGreaterThan(0);
+  });
+
+  it("shows running progress and telemetry for find task", () => {
+    render(
+      <Panels
+        {...baseProps}
+        findRunning
+        findProgress={0.42}
+        findMatchedCount={13}
+        findScannedRows={2048}
+        findElapsedMs={1530}
+      />,
+    );
+    expect(screen.getByText("Finding... 42% · matched 13")).toBeTruthy();
+    expect(screen.getByText("Scanned 2048 rows in 1.53s")).toBeTruthy();
+  });
+
+  it("shows capped result hint when full-file matches are truncated", () => {
+    render(
+      <Panels
+        {...baseProps}
+        findMatches={[{ row: 10, col: 2, value: "foo bar" }]}
+        activeFindMatchIndex={0}
+        findMatchesSource="file"
+        findMatchesHasMore
+      />,
+    );
+    expect(
+      screen.getByText("Result list reached the match cap. Narrow your query to continue."),
+    ).toBeTruthy();
   });
 });

@@ -14,6 +14,10 @@ export default function Quickbar({
   autoFitEnabled,
   onToggleAutoFit,
   onAutoFitNow,
+  freezeFirstColEnabled,
+  onToggleFreezeFirstCol,
+  freezeFirstRowEnabled,
+  onToggleFreezeFirstRow,
   onUndo,
   onRedo,
   canUndo,
@@ -65,6 +69,22 @@ export default function Quickbar({
       <button onClick={onAutoFitNow} disabled={!hasPreview || loading}>
         {t("Auto-fit now", "立即自适应")}
       </button>
+      <label className="field checkbox">
+        <span>{t("Freeze col A", "冻结首列")}</span>
+        <input
+          type="checkbox"
+          checked={freezeFirstColEnabled}
+          onChange={(e) => onToggleFreezeFirstCol(e.target.checked)}
+        />
+      </label>
+      <label className="field checkbox">
+        <span>{t("Freeze row 1", "冻结首行")}</span>
+        <input
+          type="checkbox"
+          checked={freezeFirstRowEnabled}
+          onChange={(e) => onToggleFreezeFirstRow(e.target.checked)}
+        />
+      </label>
       <button onClick={onUndo} disabled={!canUndo}>
         {t("Undo", "撤销")}
       </button>

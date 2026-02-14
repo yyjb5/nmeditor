@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invokeCmd } from "../tauriBridge";
 
 export type CsvPreview = {
   headers: string[];
@@ -49,10 +49,10 @@ export default function useCsvSession({ setError }: UseCsvSessionParams) {
     setLoading(true);
     try {
       if (sessionId) {
-        await invoke("close_csv_session", { sessionId });
+        await invokeCmd("close_csv_session", { sessionId });
       }
 
-      const info = await invoke<CsvSessionInfo>("open_csv_session", {
+      const info = await invokeCmd<CsvSessionInfo>("open_csv_session", {
         path,
         delimiter: delimiterOverride ?? delimiter,
       });
@@ -81,7 +81,7 @@ export default function useCsvSession({ setError }: UseCsvSessionParams) {
   const closeSession = async () => {
     if (sessionId) {
       try {
-        await invoke("close_csv_session", { sessionId });
+        await invokeCmd("close_csv_session", { sessionId });
       } catch (err) {
         setError(String(err));
       }
@@ -101,10 +101,10 @@ export default function useCsvSession({ setError }: UseCsvSessionParams) {
     setLoading(true);
     try {
       if (sessionId) {
-        await invoke("close_csv_session", { sessionId });
+        await invokeCmd("close_csv_session", { sessionId });
       }
 
-      const info = await invoke<CsvSessionInfo>("open_csv_session", {
+      const info = await invokeCmd<CsvSessionInfo>("open_csv_session", {
         path: activePath,
         delimiter,
       });
@@ -133,7 +133,7 @@ export default function useCsvSession({ setError }: UseCsvSessionParams) {
     if (!activeSessionId || loadingRows || eof) return;
     setLoadingRows(true);
     try {
-      const slice = await invoke<CsvSlice>("read_csv_rows", {
+      const slice = await invokeCmd<CsvSlice>("read_csv_rows", {
         sessionId: activeSessionId,
         start: rows.length,
         limit: 200,

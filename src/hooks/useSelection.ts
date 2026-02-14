@@ -99,6 +99,21 @@ export default function useSelection(rowCount: number, colCount: number) {
     setIsDraggingSelection(false);
   };
 
+  const selectAll = () => {
+    if (!rowCount || !colCount) return;
+    setSelectionMode("cell");
+    setSelectionAnchor({ row: 0, col: 0 });
+    setSelectionRanges([
+      {
+        startRow: 0,
+        endRow: rowCount - 1,
+        startCol: 0,
+        endCol: colCount - 1,
+      },
+    ]);
+    setIsDraggingSelection(false);
+  };
+
   const getActiveRange = () =>
     selectionRanges.length ? selectionRanges[selectionRanges.length - 1] : null;
 
@@ -125,6 +140,7 @@ export default function useSelection(rowCount: number, colCount: number) {
     setIsDraggingSelection,
     updateSelection,
     clearSelection,
+    selectAll,
     getActiveRange,
     isCellInSelection,
     isRowInSelection,

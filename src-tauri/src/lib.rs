@@ -3,16 +3,16 @@ use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::sync::OnceLock;
 #[cfg(desktop)]
 use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder};
+use tauri::Emitter;
 #[cfg(desktop)]
 use tauri::Manager;
-use tauri::Emitter;
 
 /// Choose delimiter from user input; supports "\t" for tabs and falls back to comma.
 fn parse_delimiter(input: &str) -> u8 {
@@ -64,7 +64,8 @@ fn rewrite_with_utf8_bom(path: &str, bom: bool) -> Result<(), String> {
         .truncate(true)
         .open(path)
         .map_err(|e| e.to_string())?;
-    file.write_all(&[0xEF, 0xBB, 0xBF]).map_err(|e| e.to_string())?;
+    file.write_all(&[0xEF, 0xBB, 0xBF])
+        .map_err(|e| e.to_string())?;
     file.write_all(&content).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -106,18 +107,30 @@ fn build_app_menu<R: tauri::Runtime, M: Manager<R>>(
     let file_save = MenuItemBuilder::with_id("file_save", if zh { "保存" } else { "Save" })
         .accelerator("CmdOrCtrl+S")
         .build(manager)?;
-    let file_save_as = MenuItemBuilder::with_id("file_save_as", if zh { "另存为..." } else { "Save As..." })
-        .accelerator("CmdOrCtrl+Shift+S")
-        .build(manager)?;
-    let file_macro = MenuItemBuilder::with_id("file_macro", if zh { "运行宏(文件)" } else { "Run Macro (file)" })
-        .accelerator("CmdOrCtrl+Shift+M")
-        .build(manager)?;
+    let file_save_as =
+        MenuItemBuilder::with_id("file_save_as", if zh { "另存为..." } else { "Save As..." })
+            .accelerator("CmdOrCtrl+Shift+S")
+            .build(manager)?;
+    let file_macro = MenuItemBuilder::with_id(
+        "file_macro",
+        if zh {
+            "运行宏(文件)"
+        } else {
+            "Run Macro (file)"
+        },
+    )
+    .accelerator("CmdOrCtrl+Shift+M")
+    .build(manager)?;
     let file_find_replace = MenuItemBuilder::with_id(
         "file_find_replace",
-        if zh { "查找/替换(文件)" } else { "Find/Replace (file)" },
+        if zh {
+            "查找/替换(文件)"
+        } else {
+            "Find/Replace (file)"
+        },
     )
-        .accelerator("CmdOrCtrl+Shift+F")
-        .build(manager)?;
+    .accelerator("CmdOrCtrl+Shift+F")
+    .build(manager)?;
     let app_quit = MenuItemBuilder::with_id("app_quit", if zh { "退出" } else { "Quit" })
         .accelerator("CmdOrCtrl+Q")
         .build(manager)?;
@@ -128,60 +141,132 @@ fn build_app_menu<R: tauri::Runtime, M: Manager<R>>(
     let edit_redo = MenuItemBuilder::with_id("edit_redo", if zh { "重做" } else { "Redo" })
         .accelerator("CmdOrCtrl+Shift+Z")
         .build(manager)?;
-    let edit_clear = MenuItemBuilder::with_id("edit_clear", if zh { "清除编辑" } else { "Clear Edits" })
-        .accelerator("CmdOrCtrl+Shift+X")
-        .build(manager)?;
+    let edit_clear =
+        MenuItemBuilder::with_id("edit_clear", if zh { "清除编辑" } else { "Clear Edits" })
+            .accelerator("CmdOrCtrl+Shift+X")
+            .build(manager)?;
 
-    let view_load_more = MenuItemBuilder::with_id("view_load_more", if zh { "加载更多行" } else { "Load more rows" })
-        .accelerator("CmdOrCtrl+L")
-        .build(manager)?;
+    let view_load_more = MenuItemBuilder::with_id(
+        "view_load_more",
+        if zh {
+            "加载更多行"
+        } else {
+            "Load more rows"
+        },
+    )
+    .accelerator("CmdOrCtrl+L")
+    .build(manager)?;
     let view_stats = MenuItemBuilder::with_id(
         "view_stats",
-        if zh { "列统计(全量)" } else { "Column stats (full)" },
+        if zh {
+            "列统计(全量)"
+        } else {
+            "Column stats (full)"
+        },
     )
-        .accelerator("CmdOrCtrl+Shift+T")
-        .build(manager)?;
-    let view_toggle_quickbar =
-        MenuItemBuilder::with_id("view_toggle_quickbar", if zh { "切换快捷栏" } else { "Toggle quickbar" })
-            .accelerator("CmdOrCtrl+1")
-            .build(manager)?;
-    let view_toggle_findbar =
-        MenuItemBuilder::with_id("view_toggle_findbar", if zh { "切换查找栏" } else { "Toggle find bar" })
-            .accelerator("CmdOrCtrl+2")
-            .build(manager)?;
-    let view_toggle_macro =
-        MenuItemBuilder::with_id("view_toggle_macro", if zh { "切换宏面板" } else { "Toggle macro panel" })
-            .accelerator("CmdOrCtrl+3")
-            .build(manager)?;
+    .accelerator("CmdOrCtrl+Shift+T")
+    .build(manager)?;
+    let view_toggle_quickbar = MenuItemBuilder::with_id(
+        "view_toggle_quickbar",
+        if zh {
+            "切换快捷栏"
+        } else {
+            "Toggle quickbar"
+        },
+    )
+    .accelerator("CmdOrCtrl+1")
+    .build(manager)?;
+    let view_toggle_findbar = MenuItemBuilder::with_id(
+        "view_toggle_findbar",
+        if zh {
+            "切换查找栏"
+        } else {
+            "Toggle find bar"
+        },
+    )
+    .accelerator("CmdOrCtrl+2")
+    .build(manager)?;
+    let view_toggle_macro = MenuItemBuilder::with_id(
+        "view_toggle_macro",
+        if zh {
+            "切换宏面板"
+        } else {
+            "Toggle macro panel"
+        },
+    )
+    .accelerator("CmdOrCtrl+3")
+    .build(manager)?;
     let view_toggle_ops = MenuItemBuilder::with_id(
         "view_toggle_ops",
-        if zh { "切换列/排序/筛选面板" } else { "Toggle column/sort/filter panel" },
+        if zh {
+            "切换列/排序/筛选面板"
+        } else {
+            "Toggle column/sort/filter panel"
+        },
     )
     .accelerator("CmdOrCtrl+4")
     .build(manager)?;
-    let view_toggle_export =
-        MenuItemBuilder::with_id("view_toggle_export", if zh { "切换导出选项" } else { "Toggle export options" })
-            .accelerator("CmdOrCtrl+5")
-            .build(manager)?;
-    let view_toggle_find_panel =
-        MenuItemBuilder::with_id("view_toggle_find_panel", if zh { "切换查找/替换面板" } else { "Toggle find/replace panel" })
-            .accelerator("CmdOrCtrl+6")
-            .build(manager)?;
-    let view_toggle_stats_panel =
-        MenuItemBuilder::with_id("view_toggle_stats_panel", if zh { "切换统计面板" } else { "Toggle stats panel" })
-            .accelerator("CmdOrCtrl+7")
-            .build(manager)?;
+    let view_toggle_export = MenuItemBuilder::with_id(
+        "view_toggle_export",
+        if zh {
+            "切换导出选项"
+        } else {
+            "Toggle export options"
+        },
+    )
+    .accelerator("CmdOrCtrl+5")
+    .build(manager)?;
+    let view_toggle_find_panel = MenuItemBuilder::with_id(
+        "view_toggle_find_panel",
+        if zh {
+            "切换查找/替换面板"
+        } else {
+            "Toggle find/replace panel"
+        },
+    )
+    .accelerator("CmdOrCtrl+6")
+    .build(manager)?;
+    let view_toggle_stats_panel = MenuItemBuilder::with_id(
+        "view_toggle_stats_panel",
+        if zh {
+            "切换统计面板"
+        } else {
+            "Toggle stats panel"
+        },
+    )
+    .accelerator("CmdOrCtrl+7")
+    .build(manager)?;
 
-    let tools_find_loaded =
-        MenuItemBuilder::with_id("tools_find_loaded", if zh { "查找/替换(已加载)" } else { "Find/Replace (loaded)" })
-            .accelerator("CmdOrCtrl+F")
-            .build(manager)?;
-    let tools_macro_loaded = MenuItemBuilder::with_id("tools_macro_loaded", if zh { "宏(已加载)" } else { "Macro (loaded)" })
-        .accelerator("CmdOrCtrl+M")
-        .build(manager)?;
+    let tools_find_loaded = MenuItemBuilder::with_id(
+        "tools_find_loaded",
+        if zh {
+            "查找/替换(已加载)"
+        } else {
+            "Find/Replace (loaded)"
+        },
+    )
+    .accelerator("CmdOrCtrl+F")
+    .build(manager)?;
+    let tools_macro_loaded = MenuItemBuilder::with_id(
+        "tools_macro_loaded",
+        if zh {
+            "宏(已加载)"
+        } else {
+            "Macro (loaded)"
+        },
+    )
+    .accelerator("CmdOrCtrl+M")
+    .build(manager)?;
 
-    let help_about = MenuItemBuilder::with_id("help_about", if zh { "关于 nmeditor" } else { "About nmeditor" })
-        .build(manager)?;
+    let help_about = MenuItemBuilder::with_id(
+        "help_about",
+        if zh {
+            "关于 nmeditor"
+        } else {
+            "About nmeditor"
+        },
+    )
+    .build(manager)?;
 
     let file_menu = SubmenuBuilder::new(manager, if zh { "文件" } else { "File" })
         .item(&file_open)
@@ -293,7 +378,11 @@ pub enum ColumnOp {
     #[serde(rename = "rename")]
     Rename { index: usize, name: String },
     #[serde(rename = "duplicate")]
-    Duplicate { index: usize, from: usize, name: String },
+    Duplicate {
+        index: usize,
+        from: usize,
+        name: String,
+    },
 }
 
 #[derive(Clone)]
@@ -341,6 +430,21 @@ pub struct FindReplaceResult {
     pub applied: usize,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FindMatchEntry {
+    pub row: usize,
+    pub col: usize,
+    pub value: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct FindMatchesResult {
+    pub matches: Vec<FindMatchEntry>,
+    pub has_more: bool,
+    pub scanned_rows: usize,
+    pub elapsed_ms: u64,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct SortRule {
     pub column: usize,
@@ -357,6 +461,20 @@ pub struct FilterRule {
 pub struct GlobalViewResponse {
     pub view_id: u64,
     pub total_rows: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ColumnValueCount {
+    pub value: String,
+    pub count: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ColumnValueCountsResult {
+    pub values: Vec<ColumnValueCount>,
+    pub has_more: bool,
+    pub truncated: bool,
+    pub scanned_rows: usize,
 }
 
 #[derive(Clone)]
@@ -392,7 +510,9 @@ impl Ord for SortKey {
             let a = &self.items[idx];
             let b = &other.items[idx];
             let base = match (a.num, b.num) {
-                (Some(a_num), Some(b_num)) => a_num.partial_cmp(&b_num).unwrap_or(CmpOrdering::Equal),
+                (Some(a_num), Some(b_num)) => {
+                    a_num.partial_cmp(&b_num).unwrap_or(CmpOrdering::Equal)
+                }
                 _ => a.text.cmp(&b.text),
             };
             if base != CmpOrdering::Equal {
@@ -442,6 +562,8 @@ struct AppState {
     indexes: Arc<Mutex<HashMap<String, Arc<CsvIndex>>>>,
     index_jobs: Arc<Mutex<HashMap<u64, IndexJob>>>,
     next_index_job: AtomicU64,
+    find_jobs: Arc<Mutex<HashMap<u64, FindJob>>>,
+    next_find_job: AtomicU64,
     views: Mutex<HashMap<u64, GlobalView>>,
     next_view_id: AtomicU64,
 }
@@ -470,12 +592,48 @@ struct IndexJob {
     cancel_flag: Arc<AtomicBool>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct StartFindMatchesResponse {
+    job_id: u64,
+    done: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FindMatchesJobStatus {
+    job_id: u64,
+    progress: f32,
+    done: bool,
+    canceled: bool,
+    has_more: bool,
+    matched_count: usize,
+    scanned_rows: usize,
+    elapsed_ms: u64,
+    matches: Option<Vec<FindMatchEntry>>,
+    matches_offset: Option<usize>,
+    matches_total: Option<usize>,
+    error: Option<String>,
+}
+
+struct FindJob {
+    progress: f32,
+    done: bool,
+    canceled: bool,
+    has_more: bool,
+    matched_count: usize,
+    scanned_rows: usize,
+    elapsed_ms: u64,
+    matches: Vec<FindMatchEntry>,
+    error: Option<String>,
+    cancel_flag: Arc<AtomicBool>,
+}
+
 static MENU_EVENT_GUARD: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
 const INDEX_STRIDE: usize = 1000;
 const MAX_INDEX_CACHE_ENTRIES: usize = 12;
 const MAX_GLOBAL_VIEW_ENTRIES: usize = 6;
 const MAX_INDEX_JOB_ENTRIES: usize = 64;
+const MAX_FIND_JOB_ENTRIES: usize = 64;
 
 fn index_key(path: &str, delimiter: u8) -> String {
     format!("{}::{}", path, delimiter)
@@ -509,6 +667,19 @@ fn prune_index_jobs(jobs: &mut HashMap<u64, IndexJob>) {
     }
 }
 
+fn prune_find_jobs(jobs: &mut HashMap<u64, FindJob>) {
+    jobs.retain(|_, job| !job.done);
+    if jobs.len() <= MAX_FIND_JOB_ENTRIES {
+        return;
+    }
+    let mut ids: Vec<u64> = jobs.keys().copied().collect();
+    ids.sort_unstable();
+    let remove_count = jobs.len() - MAX_FIND_JOB_ENTRIES;
+    for id in ids.into_iter().take(remove_count) {
+        jobs.remove(&id);
+    }
+}
+
 fn file_signature(path: &PathBuf) -> Result<(u64, u64), String> {
     let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
     let modified = metadata
@@ -516,11 +687,20 @@ fn file_signature(path: &PathBuf) -> Result<(u64, u64), String> {
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs())
-        .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs());
+        .unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        });
     Ok((metadata.len(), modified))
 }
 
-fn update_index_job(jobs: &Arc<Mutex<HashMap<u64, IndexJob>>>, job_id: u64, update: impl FnOnce(&mut IndexJob)) {
+fn update_index_job(
+    jobs: &Arc<Mutex<HashMap<u64, IndexJob>>>,
+    job_id: u64,
+    update: impl FnOnce(&mut IndexJob),
+) {
     if let Ok(mut map) = jobs.lock() {
         if let Some(job) = map.get_mut(&job_id) {
             update(job);
@@ -597,7 +777,9 @@ fn start_prepare_csv_index(
             let mut reader = csv::ReaderBuilder::new()
                 .has_headers(true)
                 .delimiter(delimiter_byte)
-                .from_reader(BufReader::new(File::open(&path_buf).map_err(|e| e.to_string())?));
+                .from_reader(BufReader::new(
+                    File::open(&path_buf).map_err(|e| e.to_string())?,
+                ));
 
             let _ = reader.headers().map_err(|e| e.to_string())?;
             let mut offsets = Vec::new();
@@ -705,6 +887,1150 @@ fn get_prepare_csv_index_status(
     Ok(status)
 }
 
+fn update_find_job(
+    jobs: &Arc<Mutex<HashMap<u64, FindJob>>>,
+    job_id: u64,
+    update: impl FnOnce(&mut FindJob),
+) {
+    if let Ok(mut map) = jobs.lock() {
+        if let Some(job) = map.get_mut(&job_id) {
+            update(job);
+        }
+    }
+}
+
+fn is_find_job_canceled(jobs: &Arc<Mutex<HashMap<u64, FindJob>>>, job_id: u64) -> bool {
+    if let Ok(map) = jobs.lock() {
+        if let Some(job) = map.get(&job_id) {
+            return job.cancel_flag.load(Ordering::Relaxed);
+        }
+    }
+    false
+}
+
+fn bytes_match_at(haystack: &[u8], needle: &[u8], start: usize, match_case: bool) -> bool {
+    if start + needle.len() > haystack.len() {
+        return false;
+    }
+    if match_case {
+        return &haystack[start..start + needle.len()] == needle;
+    }
+    for (idx, value) in needle.iter().enumerate() {
+        if haystack[start + idx].to_ascii_lowercase() != value.to_ascii_lowercase() {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_all_upper_ascii(value: &str) -> bool {
+    let mut has_letter = false;
+    for byte in value.bytes() {
+        if byte.is_ascii_alphabetic() {
+            has_letter = true;
+            if !byte.is_ascii_uppercase() {
+                return false;
+            }
+        }
+    }
+    has_letter
+}
+
+fn is_all_lower_ascii(value: &str) -> bool {
+    let mut has_letter = false;
+    for byte in value.bytes() {
+        if byte.is_ascii_alphabetic() {
+            has_letter = true;
+            if !byte.is_ascii_lowercase() {
+                return false;
+            }
+        }
+    }
+    has_letter
+}
+
+fn is_title_case_words_ascii(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut idx = 0usize;
+    let mut has_word = false;
+    while idx < bytes.len() {
+        while idx < bytes.len() && !bytes[idx].is_ascii_alphabetic() {
+            idx += 1;
+        }
+        if idx >= bytes.len() {
+            break;
+        }
+        has_word = true;
+        if !bytes[idx].is_ascii_uppercase() {
+            return false;
+        }
+        idx += 1;
+        while idx < bytes.len() && bytes[idx].is_ascii_alphabetic() {
+            if !bytes[idx].is_ascii_lowercase() {
+                return false;
+            }
+            idx += 1;
+        }
+    }
+    has_word
+}
+
+fn to_title_case_words_ascii(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut in_word = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphabetic() {
+            if in_word {
+                out.push(ch.to_ascii_lowercase());
+            } else {
+                out.push(ch.to_ascii_uppercase());
+                in_word = true;
+            }
+        } else {
+            in_word = false;
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn apply_replacement_case_pattern(replacement: &str, source: &str) -> String {
+    if replacement.is_empty() || source.is_empty() {
+        return replacement.to_string();
+    }
+    if is_all_upper_ascii(source) {
+        return replacement.to_ascii_uppercase();
+    }
+    if is_all_lower_ascii(source) {
+        return replacement.to_ascii_lowercase();
+    }
+    if is_title_case_words_ascii(source) {
+        return to_title_case_words_ascii(replacement);
+    }
+    replacement.to_string()
+}
+
+fn decode_utf16le_bytes(data: &[u8]) -> Option<String> {
+    if data.len() % 2 != 0 {
+        return None;
+    }
+    let mut units = Vec::with_capacity(data.len() / 2);
+    let mut idx = 0usize;
+    while idx + 1 < data.len() {
+        units.push(u16::from_le_bytes([data[idx], data[idx + 1]]));
+        idx += 2;
+    }
+    String::from_utf16(&units).ok()
+}
+
+fn encode_utf16le_text(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() * 2);
+    for unit in text.encode_utf16() {
+        out.extend_from_slice(&unit.to_le_bytes());
+    }
+    out
+}
+
+const REPLACE_JOURNAL_FILE_PREFIX: &str = ".deskcsv_replace_journal_";
+const REPLACE_JOURNAL_DIR_NAME: &str = "deskcsv_replace_journals";
+
+#[derive(Serialize, Deserialize)]
+struct ReplaceJournalRecord {
+    version: u8,
+    op: String,
+    created_at_ms: u64,
+    target_path: String,
+    temp_path: String,
+    backup_path: String,
+}
+
+struct ReplaceJournalGuard {
+    journal_path: PathBuf,
+    record: ReplaceJournalRecord,
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+fn replace_journal_dir() -> PathBuf {
+    std::env::temp_dir().join(REPLACE_JOURNAL_DIR_NAME)
+}
+
+fn create_replace_journal_in_dir(
+    journal_dir: &Path,
+    target: &Path,
+    temp: &Path,
+    op: &str,
+) -> Result<ReplaceJournalGuard, String> {
+    fs::create_dir_all(journal_dir).map_err(|e| e.to_string())?;
+    let stamp = now_ms();
+    let token = format!("{}_{}", std::process::id(), stamp);
+    let backup_path = journal_dir.join(format!(".deskcsv_replace_backup_{}.bak", token));
+    fs::copy(target, &backup_path).map_err(|e| e.to_string())?;
+    let record = ReplaceJournalRecord {
+        version: 1,
+        op: op.to_string(),
+        created_at_ms: stamp,
+        target_path: target.to_string_lossy().to_string(),
+        temp_path: temp.to_string_lossy().to_string(),
+        backup_path: backup_path.to_string_lossy().to_string(),
+    };
+    let journal_path = journal_dir.join(format!("{}{}.json", REPLACE_JOURNAL_FILE_PREFIX, token));
+    let payload = serde_json::to_vec(&record).map_err(|e| e.to_string())?;
+    fs::write(&journal_path, payload).map_err(|e| e.to_string())?;
+    Ok(ReplaceJournalGuard {
+        journal_path,
+        record,
+    })
+}
+
+fn create_replace_journal(
+    target: &Path,
+    temp: &Path,
+    op: &str,
+) -> Result<ReplaceJournalGuard, String> {
+    create_replace_journal_in_dir(&replace_journal_dir(), target, temp, op)
+}
+
+fn cleanup_replace_journal(guard: &ReplaceJournalGuard) {
+    let _ = fs::remove_file(PathBuf::from(&guard.record.temp_path));
+    let _ = fs::remove_file(PathBuf::from(&guard.record.backup_path));
+    let _ = fs::remove_file(&guard.journal_path);
+}
+
+fn restore_target_from_replace_journal(guard: &ReplaceJournalGuard) -> Result<(), String> {
+    let target = PathBuf::from(&guard.record.target_path);
+    let backup = PathBuf::from(&guard.record.backup_path);
+    if !backup.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::copy(&backup, &target).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn recover_pending_replace_journals_in_dir(journal_dir: &Path) -> Result<usize, String> {
+    if !journal_dir.exists() {
+        return Ok(0);
+    }
+    let mut recovered = 0usize;
+    for entry in fs::read_dir(journal_dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if !entry.file_type().map_err(|e| e.to_string())?.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !file_name.starts_with(REPLACE_JOURNAL_FILE_PREFIX) || !file_name.ends_with(".json") {
+            continue;
+        }
+        let raw = fs::read(&path).map_err(|e| e.to_string())?;
+        let record: ReplaceJournalRecord = match serde_json::from_slice(&raw) {
+            Ok(record) => record,
+            Err(_) => {
+                let _ = fs::remove_file(path);
+                continue;
+            }
+        };
+
+        let target = PathBuf::from(&record.target_path);
+        let temp = PathBuf::from(&record.temp_path);
+        let backup = PathBuf::from(&record.backup_path);
+
+        if !target.exists() {
+            if backup.exists() {
+                if let Some(parent) = target.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                fs::copy(&backup, &target).map_err(|e| e.to_string())?;
+                recovered = recovered.saturating_add(1);
+            } else if temp.exists() {
+                if fs::rename(&temp, &target).is_err() {
+                    fs::copy(&temp, &target).map_err(|e| e.to_string())?;
+                    let _ = fs::remove_file(&temp);
+                }
+                recovered = recovered.saturating_add(1);
+            }
+        }
+
+        let _ = fs::remove_file(temp);
+        let _ = fs::remove_file(backup);
+        let _ = fs::remove_file(path);
+    }
+    Ok(recovered)
+}
+
+fn recover_pending_replace_journals() -> Result<usize, String> {
+    recover_pending_replace_journals_in_dir(&replace_journal_dir())
+}
+
+fn scan_text_literal_matches<FIsCanceled, FOnProgress, FOnMatches>(
+    path: &str,
+    find: &str,
+    match_case: bool,
+    encoding: &str,
+    max_matches: usize,
+    mut is_canceled: FIsCanceled,
+    mut on_progress: FOnProgress,
+    mut on_matches: FOnMatches,
+) -> Result<FindMatchesResult, String>
+where
+    FIsCanceled: FnMut() -> bool,
+    FOnProgress: FnMut(f32, usize, usize),
+    FOnMatches: FnMut(&[FindMatchEntry]),
+{
+    if find.is_empty() {
+        return Err("Find text is required.".to_string());
+    }
+
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let file_len = file.metadata().map_err(|e| e.to_string())?.len().max(1);
+    let mut bom = [0u8; 2];
+    let bom_read = file.read(&mut bom).map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+
+    let mut align_base: Option<u64> = None;
+    let needle = match encoding.to_uppercase().as_str() {
+        "UTF-16LE" => {
+            if !match_case {
+                return Err(
+                    "Case-insensitive find for UTF-16LE is not supported in text chunk mode."
+                        .to_string(),
+                );
+            }
+            align_base = Some(if bom_read >= 2 && bom == [0xFF, 0xFE] {
+                2
+            } else {
+                0
+            });
+            let mut out = Vec::with_capacity(find.len() * 2);
+            for unit in find.encode_utf16() {
+                out.extend_from_slice(&unit.to_le_bytes());
+            }
+            out
+        }
+        _ => {
+            if !match_case && !find.is_ascii() {
+                return Err(
+                    "Case-insensitive find in text chunk mode currently supports ASCII only."
+                        .to_string(),
+                );
+            }
+            find.as_bytes().to_vec()
+        }
+    };
+
+    if needle.is_empty() {
+        return Err("Find text is required.".to_string());
+    }
+
+    let started_at = Instant::now();
+    let mut matches: Vec<FindMatchEntry> = Vec::new();
+    let mut has_more = false;
+    let mut scanned_bytes = 0usize;
+    let mut last_progress = 0.0f32;
+    let mut emitted_matches = 0usize;
+    let mut absolute_read = 0u64;
+    let mut carry: Vec<u8> = Vec::new();
+    let mut read_buf = vec![0u8; 1024 * 1024];
+    let overlap = needle.len().saturating_sub(1);
+
+    loop {
+        if is_canceled() {
+            return Err("canceled".to_string());
+        }
+        let read_len = file.read(&mut read_buf).map_err(|e| e.to_string())?;
+        if read_len == 0 {
+            break;
+        }
+        scanned_bytes = scanned_bytes.saturating_add(read_len);
+
+        let data_offset = absolute_read.saturating_sub(carry.len() as u64);
+        let mut data = Vec::with_capacity(carry.len() + read_len);
+        data.extend_from_slice(&carry);
+        data.extend_from_slice(&read_buf[..read_len]);
+
+        let searchable_end = data.len().saturating_sub(needle.len()).saturating_add(1);
+        for idx in 0..searchable_end {
+            let abs = data_offset + idx as u64;
+            if let Some(base) = align_base {
+                if abs < base || (abs - base) % 2 != 0 {
+                    continue;
+                }
+            }
+            if !bytes_match_at(&data, &needle, idx, match_case) {
+                continue;
+            }
+            matches.push(FindMatchEntry {
+                row: abs as usize,
+                col: needle.len(),
+                value: String::new(),
+            });
+            if matches.len() > max_matches {
+                has_more = true;
+                matches.truncate(max_matches);
+                break;
+            }
+        }
+        if matches.len() > emitted_matches {
+            on_matches(&matches[emitted_matches..]);
+            emitted_matches = matches.len();
+        }
+        if has_more {
+            break;
+        }
+
+        carry.clear();
+        if overlap > 0 && data.len() >= overlap {
+            carry.extend_from_slice(&data[data.len() - overlap..]);
+        } else if overlap > 0 {
+            carry.extend_from_slice(&data);
+        }
+
+        absolute_read = absolute_read.saturating_add(read_len as u64);
+        let progress = (absolute_read as f32 / file_len as f32).clamp(0.0, 0.98);
+        if progress - last_progress >= 0.01 {
+            last_progress = progress;
+            on_progress(progress, matches.len(), scanned_bytes);
+        }
+    }
+
+    if matches.len() > emitted_matches {
+        on_matches(&matches[emitted_matches..]);
+    }
+    on_progress(1.0, matches.len(), scanned_bytes);
+    Ok(FindMatchesResult {
+        matches,
+        has_more,
+        scanned_rows: scanned_bytes,
+        elapsed_ms: started_at.elapsed().as_millis() as u64,
+    })
+}
+
+fn scan_text_regex_matches<FIsCanceled, FOnProgress, FOnMatches>(
+    path: &str,
+    pattern: &str,
+    match_case: bool,
+    encoding: &str,
+    max_matches: usize,
+    mut is_canceled: FIsCanceled,
+    mut on_progress: FOnProgress,
+    mut on_matches: FOnMatches,
+) -> Result<FindMatchesResult, String>
+where
+    FIsCanceled: FnMut() -> bool,
+    FOnProgress: FnMut(f32, usize, usize),
+    FOnMatches: FnMut(&[FindMatchEntry]),
+{
+    if pattern.is_empty() {
+        return Err("Find text is required.".to_string());
+    }
+    const CHUNK_BYTES: usize = 1024 * 1024;
+    const OVERLAP_BYTES: usize = 256 * 1024;
+
+    let started_at = Instant::now();
+    let mut matches: Vec<FindMatchEntry> = Vec::new();
+    let mut has_more = false;
+    let mut scanned_bytes = 0usize;
+    let mut last_progress = 0.0f32;
+    let mut emitted_matches = 0usize;
+    let mut processed_until_global = 0u64;
+    let is_utf16 = encoding.to_uppercase() == "UTF-16LE";
+
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let file_len = file.metadata().map_err(|e| e.to_string())?.len().max(1);
+    let mut absolute_read = 0u64;
+    let mut carry: Vec<u8> = Vec::new();
+    let mut read_buf = vec![0u8; CHUNK_BYTES];
+
+    if is_utf16 {
+        let mut bom = [0u8; 2];
+        let bom_read = file.read(&mut bom).map_err(|e| e.to_string())?;
+        let utf16_start = if bom_read >= 2 && bom == [0xFF, 0xFE] {
+            2u64
+        } else {
+            0u64
+        };
+        file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+
+        let mut builder = regex::RegexBuilder::new(pattern);
+        builder.case_insensitive(!match_case);
+        let re = builder.build().map_err(|e| e.to_string())?;
+
+        loop {
+            if is_canceled() {
+                return Err("canceled".to_string());
+            }
+            let read_len = file.read(&mut read_buf).map_err(|e| e.to_string())?;
+            let eof = read_len == 0;
+            if eof && carry.is_empty() {
+                break;
+            }
+            if read_len > 0 {
+                scanned_bytes = scanned_bytes.saturating_add(read_len);
+            }
+
+            let data_offset = absolute_read.saturating_sub(carry.len() as u64);
+            let mut data = Vec::with_capacity(carry.len() + read_len);
+            data.extend_from_slice(&carry);
+            data.extend_from_slice(&read_buf[..read_len]);
+
+            let mut decode_start = 0usize;
+            if data_offset == 0 && data.len() >= 2 && data[0] == 0xFF && data[1] == 0xFE {
+                decode_start = 2;
+            } else if data_offset < utf16_start {
+                decode_start = (utf16_start - data_offset) as usize;
+            }
+            if decode_start > data.len() {
+                decode_start = data.len();
+            }
+
+            let mut decode_end = data.len();
+            let decode_span = decode_end.saturating_sub(decode_start);
+            decode_end = decode_start + decode_span - (decode_span % 2);
+
+            let mut safe_emit_end = if eof {
+                decode_end
+            } else {
+                data.len().saturating_sub(OVERLAP_BYTES).min(decode_end)
+            };
+            if safe_emit_end < decode_start {
+                safe_emit_end = decode_start;
+            }
+            safe_emit_end -= (safe_emit_end - decode_start) % 2;
+
+            if decode_end > decode_start {
+                let mut units = Vec::with_capacity((decode_end - decode_start) / 2);
+                let mut idx = decode_start;
+                while idx + 1 < decode_end {
+                    units.push(u16::from_le_bytes([data[idx], data[idx + 1]]));
+                    idx += 2;
+                }
+                let text = String::from_utf16_lossy(&units);
+                let decode_global_start = data_offset.saturating_add(decode_start as u64);
+                let safe_global_end = data_offset.saturating_add(safe_emit_end as u64);
+
+                for m in re.find_iter(&text) {
+                    let start_u16 = text[..m.start()].encode_utf16().count();
+                    let len_u16 = text[m.start()..m.end()].encode_utf16().count();
+                    let global_start = decode_global_start.saturating_add((start_u16 * 2) as u64);
+                    let global_end = global_start.saturating_add((len_u16 * 2) as u64);
+                    if global_end <= processed_until_global {
+                        continue;
+                    }
+                    if !eof && global_end > safe_global_end {
+                        continue;
+                    }
+                    matches.push(FindMatchEntry {
+                        row: global_start as usize,
+                        col: (len_u16 * 2).max(2),
+                        value: String::new(),
+                    });
+                    if matches.len() > max_matches {
+                        has_more = true;
+                        matches.truncate(max_matches);
+                        break;
+                    }
+                }
+            }
+            if matches.len() > emitted_matches {
+                on_matches(&matches[emitted_matches..]);
+                emitted_matches = matches.len();
+            }
+
+            if has_more {
+                break;
+            }
+
+            processed_until_global = data_offset.saturating_add(safe_emit_end as u64);
+            carry.clear();
+            if !eof {
+                let keep = data.len().min(OVERLAP_BYTES);
+                carry.extend_from_slice(&data[data.len() - keep..]);
+            }
+
+            absolute_read = absolute_read.saturating_add(read_len as u64);
+            let progress = (absolute_read as f32 / file_len as f32).clamp(0.0, 0.98);
+            if progress - last_progress >= 0.01 {
+                last_progress = progress;
+                on_progress(progress, matches.len(), scanned_bytes);
+            }
+            if eof {
+                break;
+            }
+        }
+    } else {
+        let mut builder = regex::bytes::RegexBuilder::new(pattern);
+        builder.case_insensitive(!match_case);
+        let re = builder.build().map_err(|e| e.to_string())?;
+
+        loop {
+            if is_canceled() {
+                return Err("canceled".to_string());
+            }
+            let read_len = file.read(&mut read_buf).map_err(|e| e.to_string())?;
+            let eof = read_len == 0;
+            if eof && carry.is_empty() {
+                break;
+            }
+            if read_len > 0 {
+                scanned_bytes = scanned_bytes.saturating_add(read_len);
+            }
+
+            let data_offset = absolute_read.saturating_sub(carry.len() as u64);
+            let mut data = Vec::with_capacity(carry.len() + read_len);
+            data.extend_from_slice(&carry);
+            data.extend_from_slice(&read_buf[..read_len]);
+
+            let mut decode_start = 0usize;
+            if data_offset == 0
+                && data.len() >= 3
+                && data[0] == 0xEF
+                && data[1] == 0xBB
+                && data[2] == 0xBF
+            {
+                decode_start = 3;
+            }
+            let safe_emit_end = if eof {
+                data.len()
+            } else {
+                data.len().saturating_sub(OVERLAP_BYTES)
+            };
+            let safe_global_end = data_offset.saturating_add(safe_emit_end as u64);
+
+            for m in re.find_iter(&data[decode_start..]) {
+                let start = decode_start + m.start();
+                let end = decode_start + m.end();
+                let global_start = data_offset.saturating_add(start as u64);
+                let global_end = data_offset.saturating_add(end as u64);
+                if global_end <= processed_until_global {
+                    continue;
+                }
+                if !eof && global_end > safe_global_end {
+                    continue;
+                }
+                matches.push(FindMatchEntry {
+                    row: global_start as usize,
+                    col: end.saturating_sub(start).max(1),
+                    value: String::new(),
+                });
+                if matches.len() > max_matches {
+                    has_more = true;
+                    matches.truncate(max_matches);
+                    break;
+                }
+            }
+            if matches.len() > emitted_matches {
+                on_matches(&matches[emitted_matches..]);
+                emitted_matches = matches.len();
+            }
+
+            if has_more {
+                break;
+            }
+
+            processed_until_global = safe_global_end;
+            carry.clear();
+            if !eof {
+                let keep = data.len().min(OVERLAP_BYTES);
+                carry.extend_from_slice(&data[data.len() - keep..]);
+            }
+
+            absolute_read = absolute_read.saturating_add(read_len as u64);
+            let progress = (absolute_read as f32 / file_len as f32).clamp(0.0, 0.98);
+            if progress - last_progress >= 0.01 {
+                last_progress = progress;
+                on_progress(progress, matches.len(), scanned_bytes);
+            }
+            if eof {
+                break;
+            }
+        }
+    }
+
+    if matches.len() > emitted_matches {
+        on_matches(&matches[emitted_matches..]);
+    }
+    on_progress(1.0, matches.len(), scanned_bytes);
+    Ok(FindMatchesResult {
+        matches,
+        has_more,
+        scanned_rows: scanned_bytes,
+        elapsed_ms: started_at.elapsed().as_millis() as u64,
+    })
+}
+
+fn replace_text_literal_in_file<FIsCanceled, FOnProgress>(
+    source_path: &str,
+    target_path: &str,
+    find: &str,
+    replace: &str,
+    match_case: bool,
+    preserve_case: bool,
+    encoding: &str,
+    mut is_canceled: FIsCanceled,
+    mut on_progress: FOnProgress,
+) -> Result<(usize, usize), String>
+where
+    FIsCanceled: FnMut() -> bool,
+    FOnProgress: FnMut(f32, usize, usize),
+{
+    if find.is_empty() {
+        return Err("Find text is required.".to_string());
+    }
+
+    let source = PathBuf::from(source_path);
+    let target = PathBuf::from(target_path);
+    let same_path = source == target;
+
+    let mut input = File::open(&source).map_err(|e| e.to_string())?;
+    let source_len = input.metadata().map_err(|e| e.to_string())?.len().max(1);
+    let mut bom = [0u8; 2];
+    let bom_read = input.read(&mut bom).map_err(|e| e.to_string())?;
+    input.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+
+    let mut align_base: Option<u64> = None;
+    let encoding_upper = encoding.to_uppercase();
+    let is_utf16 = encoding_upper == "UTF-16LE";
+    let needle = match encoding_upper.as_str() {
+        "UTF-16LE" => {
+            if !match_case {
+                return Err(
+                    "Case-insensitive replace for UTF-16LE is not supported in text chunk mode."
+                        .to_string(),
+                );
+            }
+            align_base = Some(if bom_read >= 2 && bom == [0xFF, 0xFE] {
+                2
+            } else {
+                0
+            });
+            let mut out = Vec::with_capacity(find.len() * 2);
+            for unit in find.encode_utf16() {
+                out.extend_from_slice(&unit.to_le_bytes());
+            }
+            out
+        }
+        _ => {
+            if !match_case && !find.is_ascii() {
+                return Err(
+                    "Case-insensitive replace in text chunk mode currently supports ASCII only."
+                        .to_string(),
+                );
+            }
+            find.as_bytes().to_vec()
+        }
+    };
+    if needle.is_empty() {
+        return Err("Find text is required.".to_string());
+    }
+
+    let replacement_bytes = match encoding_upper.as_str() {
+        "UTF-16LE" => encode_utf16le_text(replace),
+        _ => replace.as_bytes().to_vec(),
+    };
+
+    let temp_path = if same_path {
+        let parent = target
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        Some(parent.join(format!(
+            ".nmeditor_text_replace_{}_{}.tmp",
+            std::process::id(),
+            stamp
+        )))
+    } else {
+        None
+    };
+    let journal = if same_path {
+        let temp = temp_path
+            .as_ref()
+            .ok_or_else(|| "missing temp path for in-place text replace".to_string())?;
+        Some(create_replace_journal(
+            &target,
+            temp,
+            "replace_text_literal_in_file",
+        )?)
+    } else {
+        None
+    };
+    let write_path = temp_path.clone().unwrap_or_else(|| target.clone());
+
+    let mut read_buf = vec![0u8; 1024 * 1024];
+    let mut carry: Vec<u8> = Vec::new();
+    let mut absolute_read = 0u64;
+    let mut scanned_bytes = 0usize;
+    let mut replaced_count = 0usize;
+    let mut last_progress = 0.0f32;
+
+    let write_result = (|| -> Result<(), String> {
+        let mut output = File::create(&write_path).map_err(|e| e.to_string())?;
+        loop {
+            if is_canceled() {
+                return Err("canceled".to_string());
+            }
+            let read_len = input.read(&mut read_buf).map_err(|e| e.to_string())?;
+            let eof = read_len == 0;
+            if eof && carry.is_empty() {
+                break;
+            }
+            if read_len > 0 {
+                scanned_bytes = scanned_bytes.saturating_add(read_len);
+            }
+
+            let data_offset = absolute_read.saturating_sub(carry.len() as u64);
+            let mut data = Vec::with_capacity(carry.len() + read_len);
+            data.extend_from_slice(&carry);
+            data.extend_from_slice(&read_buf[..read_len]);
+
+            let mut idx = 0usize;
+            while idx + needle.len() <= data.len() {
+                let abs = data_offset + idx as u64;
+                if let Some(base) = align_base {
+                    if abs < base || (abs - base) % 2 != 0 {
+                        output
+                            .write_all(&data[idx..idx + 1])
+                            .map_err(|e| e.to_string())?;
+                        idx += 1;
+                        continue;
+                    }
+                }
+                if !bytes_match_at(&data, &needle, idx, match_case) {
+                    output
+                        .write_all(&data[idx..idx + 1])
+                        .map_err(|e| e.to_string())?;
+                    idx += 1;
+                    continue;
+                }
+                if preserve_case {
+                    let matched = &data[idx..idx + needle.len()];
+                    let source_text = if is_utf16 {
+                        decode_utf16le_bytes(matched).unwrap_or_default()
+                    } else {
+                        String::from_utf8_lossy(matched).to_string()
+                    };
+                    let replacement = apply_replacement_case_pattern(replace, &source_text);
+                    let replacement_bytes = if is_utf16 {
+                        encode_utf16le_text(&replacement)
+                    } else {
+                        replacement.into_bytes()
+                    };
+                    output
+                        .write_all(&replacement_bytes)
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    output
+                        .write_all(&replacement_bytes)
+                        .map_err(|e| e.to_string())?;
+                }
+                replaced_count = replaced_count.saturating_add(1);
+                idx += needle.len();
+            }
+
+            carry.clear();
+            if eof {
+                if idx < data.len() {
+                    output.write_all(&data[idx..]).map_err(|e| e.to_string())?;
+                }
+            } else if idx < data.len() {
+                carry.extend_from_slice(&data[idx..]);
+            }
+
+            absolute_read = absolute_read.saturating_add(read_len as u64);
+            let progress = (absolute_read as f32 / source_len as f32).clamp(0.0, 0.98);
+            if progress - last_progress >= 0.01 || eof {
+                last_progress = progress;
+                on_progress(progress, replaced_count, scanned_bytes);
+            }
+            if eof {
+                break;
+            }
+        }
+        output.flush().map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        if let Some(journal) = journal.as_ref() {
+            cleanup_replace_journal(journal);
+        } else if let Some(temp) = temp_path {
+            let _ = fs::remove_file(temp);
+        }
+        return write_result.map(|_| (0, 0));
+    }
+
+    if let Some(temp) = temp_path {
+        if replaced_count > 0 {
+            if fs::rename(&temp, &target).is_err() {
+                if target.exists() {
+                    fs::remove_file(&target).map_err(|e| e.to_string())?;
+                }
+                if let Err(err) = fs::rename(&temp, &target) {
+                    if let Some(journal) = journal.as_ref() {
+                        let _ = restore_target_from_replace_journal(journal);
+                        cleanup_replace_journal(journal);
+                    }
+                    return Err(err.to_string());
+                }
+            }
+        } else {
+            let _ = fs::remove_file(temp);
+        }
+    }
+    if let Some(journal) = journal.as_ref() {
+        cleanup_replace_journal(journal);
+    }
+
+    on_progress(1.0, replaced_count, scanned_bytes);
+    Ok((replaced_count, scanned_bytes))
+}
+
+fn replace_text_regex_in_file<FIsCanceled, FOnProgress>(
+    source_path: &str,
+    target_path: &str,
+    pattern: &str,
+    replace: &str,
+    match_case: bool,
+    encoding: &str,
+    mut is_canceled: FIsCanceled,
+    mut on_progress: FOnProgress,
+) -> Result<(usize, usize), String>
+where
+    FIsCanceled: FnMut() -> bool,
+    FOnProgress: FnMut(f32, usize, usize),
+{
+    if pattern.is_empty() {
+        return Err("Find text is required.".to_string());
+    }
+
+    let source = PathBuf::from(source_path);
+    let target = PathBuf::from(target_path);
+    let same_path = source == target;
+    let encoding_upper = encoding.to_uppercase();
+    let is_utf16 = encoding_upper == "UTF-16LE";
+
+    if is_utf16 {
+        let mut builder = regex::RegexBuilder::new(pattern);
+        builder.case_insensitive(!match_case);
+        let re = builder.build().map_err(|e| e.to_string())?;
+        if re.is_match("") {
+            return Err(
+                "Regex that matches empty text is not supported for file replace.".to_string(),
+            );
+        }
+    } else {
+        let mut builder = regex::bytes::RegexBuilder::new(pattern);
+        builder.case_insensitive(!match_case);
+        let re = builder.build().map_err(|e| e.to_string())?;
+        if re.is_match(b"") {
+            return Err(
+                "Regex that matches empty text is not supported for file replace.".to_string(),
+            );
+        }
+    }
+
+    let scan = scan_text_regex_matches(
+        source_path,
+        pattern,
+        match_case,
+        encoding,
+        500_000,
+        || is_canceled(),
+        |progress, matched, scanned| {
+            on_progress((progress * 0.78).clamp(0.0, 0.78), matched, scanned);
+        },
+        |_| {},
+    )?;
+    if scan.has_more {
+        return Err(
+            "Too many matches for file replace (limit 500000). Narrow your pattern and retry."
+                .to_string(),
+        );
+    }
+    if scan.matches.is_empty() {
+        on_progress(1.0, 0, scan.scanned_rows);
+        return Ok((0, scan.scanned_rows));
+    }
+
+    let temp_path = if same_path {
+        let parent = target
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        Some(parent.join(format!(
+            ".nmeditor_text_replace_regex_{}_{}.tmp",
+            std::process::id(),
+            stamp
+        )))
+    } else {
+        None
+    };
+    let journal = if same_path {
+        let temp = temp_path
+            .as_ref()
+            .ok_or_else(|| "missing temp path for in-place regex replace".to_string())?;
+        Some(create_replace_journal(
+            &target,
+            temp,
+            "replace_text_regex_in_file",
+        )?)
+    } else {
+        None
+    };
+    let write_path = temp_path.clone().unwrap_or_else(|| target.clone());
+
+    let write_result = (|| -> Result<(), String> {
+        let mut input = File::open(&source).map_err(|e| e.to_string())?;
+        let mut output = File::create(&write_path).map_err(|e| e.to_string())?;
+        let mut cursor = 0u64;
+        let total = scan.matches.len().max(1) as f32;
+
+        if is_utf16 {
+            let mut builder = regex::RegexBuilder::new(pattern);
+            builder.case_insensitive(!match_case);
+            let re = builder.build().map_err(|e| e.to_string())?;
+            for (idx, m) in scan.matches.iter().enumerate() {
+                if is_canceled() {
+                    return Err("canceled".to_string());
+                }
+                let start = m.row as u64;
+                let len = m.col as u64;
+                if start < cursor {
+                    continue;
+                }
+                input
+                    .seek(SeekFrom::Start(cursor))
+                    .map_err(|e| e.to_string())?;
+                {
+                    let mut prefix = std::io::Read::by_ref(&mut input).take(start - cursor);
+                    std::io::copy(&mut prefix, &mut output).map_err(|e| e.to_string())?;
+                }
+                input
+                    .seek(SeekFrom::Start(start))
+                    .map_err(|e| e.to_string())?;
+                let mut matched_bytes = vec![0u8; len as usize];
+                input
+                    .read_exact(&mut matched_bytes)
+                    .map_err(|e| e.to_string())?;
+                if matched_bytes.len() % 2 != 0 {
+                    return Err("Invalid UTF-16LE match span.".to_string());
+                }
+                let mut units = Vec::with_capacity(matched_bytes.len() / 2);
+                let mut pos = 0usize;
+                while pos + 1 < matched_bytes.len() {
+                    units.push(u16::from_le_bytes([
+                        matched_bytes[pos],
+                        matched_bytes[pos + 1],
+                    ]));
+                    pos += 2;
+                }
+                let matched_text = String::from_utf16_lossy(&units);
+                let replaced_text = re.replace(&matched_text, replace).to_string();
+                let mut replaced_bytes = Vec::with_capacity(replaced_text.len() * 2);
+                for unit in replaced_text.encode_utf16() {
+                    replaced_bytes.extend_from_slice(&unit.to_le_bytes());
+                }
+                output
+                    .write_all(&replaced_bytes)
+                    .map_err(|e| e.to_string())?;
+                cursor = start.saturating_add(len);
+                let progress = 0.78 + 0.2 * ((idx + 1) as f32 / total);
+                on_progress(progress.clamp(0.0, 0.98), idx + 1, scan.scanned_rows);
+            }
+        } else {
+            let mut builder = regex::bytes::RegexBuilder::new(pattern);
+            builder.case_insensitive(!match_case);
+            let re = builder.build().map_err(|e| e.to_string())?;
+            for (idx, m) in scan.matches.iter().enumerate() {
+                if is_canceled() {
+                    return Err("canceled".to_string());
+                }
+                let start = m.row as u64;
+                let len = m.col as u64;
+                if start < cursor {
+                    continue;
+                }
+                input
+                    .seek(SeekFrom::Start(cursor))
+                    .map_err(|e| e.to_string())?;
+                {
+                    let mut prefix = std::io::Read::by_ref(&mut input).take(start - cursor);
+                    std::io::copy(&mut prefix, &mut output).map_err(|e| e.to_string())?;
+                }
+                input
+                    .seek(SeekFrom::Start(start))
+                    .map_err(|e| e.to_string())?;
+                let mut matched_bytes = vec![0u8; len as usize];
+                input
+                    .read_exact(&mut matched_bytes)
+                    .map_err(|e| e.to_string())?;
+                let replaced_bytes = re.replace(&matched_bytes, replace.as_bytes()).into_owned();
+                output
+                    .write_all(&replaced_bytes)
+                    .map_err(|e| e.to_string())?;
+                cursor = start.saturating_add(len);
+                let progress = 0.78 + 0.2 * ((idx + 1) as f32 / total);
+                on_progress(progress.clamp(0.0, 0.98), idx + 1, scan.scanned_rows);
+            }
+        }
+
+        input
+            .seek(SeekFrom::Start(cursor))
+            .map_err(|e| e.to_string())?;
+        std::io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
+        output.flush().map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        if let Some(journal) = journal.as_ref() {
+            cleanup_replace_journal(journal);
+        } else if let Some(temp) = temp_path {
+            let _ = fs::remove_file(temp);
+        }
+        return write_result.map(|_| (0, 0));
+    }
+
+    if let Some(temp) = temp_path {
+        if fs::rename(&temp, &target).is_err() {
+            if target.exists() {
+                fs::remove_file(&target).map_err(|e| e.to_string())?;
+            }
+            if let Err(err) = fs::rename(&temp, &target) {
+                if let Some(journal) = journal.as_ref() {
+                    let _ = restore_target_from_replace_journal(journal);
+                    cleanup_replace_journal(journal);
+                }
+                return Err(err.to_string());
+            }
+        }
+    }
+    if let Some(journal) = journal.as_ref() {
+        cleanup_replace_journal(journal);
+    }
+
+    on_progress(1.0, scan.matches.len(), scan.scanned_rows);
+    Ok((scan.matches.len(), scan.scanned_rows))
+}
+
 fn build_csv_index_for_file(
     path: &PathBuf,
     delimiter_byte: u8,
@@ -750,10 +2076,7 @@ fn build_csv_index_for_file(
 }
 
 #[tauri::command]
-fn cancel_prepare_csv_index(
-    state: tauri::State<AppState>,
-    job_id: u64,
-) -> Result<bool, String> {
+fn cancel_prepare_csv_index(state: tauri::State<AppState>, job_id: u64) -> Result<bool, String> {
     let jobs = state.index_jobs.lock().map_err(|_| "lock poisoned")?;
     if let Some(job) = jobs.get(&job_id) {
         job.cancel_flag.store(true, Ordering::Relaxed);
@@ -846,7 +2169,9 @@ fn open_csv_session(
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .delimiter(delimiter_byte)
-        .from_reader(BufReader::new(File::open(&path_buf).map_err(|e| e.to_string())?));
+        .from_reader(BufReader::new(
+            File::open(&path_buf).map_err(|e| e.to_string())?,
+        ));
 
     let headers = reader
         .headers()
@@ -965,7 +2290,8 @@ fn read_csv_rows_window_internal(
     if let Some(index) = index {
         let (base_row, base_offset) = find_index_base(&index, start);
         let mut file = File::open(&path_buf).map_err(|e| e.to_string())?;
-        file.seek(SeekFrom::Start(base_offset)).map_err(|e| e.to_string())?;
+        file.seek(SeekFrom::Start(base_offset))
+            .map_err(|e| e.to_string())?;
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(false)
             .delimiter(delimiter_byte)
@@ -1004,7 +2330,9 @@ fn read_csv_rows_window_internal(
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(has_headers)
         .delimiter(delimiter_byte)
-        .from_reader(BufReader::new(File::open(&path_buf).map_err(|e| e.to_string())?));
+        .from_reader(BufReader::new(
+            File::open(&path_buf).map_err(|e| e.to_string())?,
+        ));
 
     if has_headers {
         let _ = reader.headers().map_err(|e| e.to_string())?;
@@ -1046,6 +2374,122 @@ fn read_csv_rows_window(
     read_csv_rows_window_internal(&state, path, delimiter, start, limit, true)
 }
 
+#[tauri::command]
+fn read_file_head_bytes(path: String, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let safe_max = max_bytes.clamp(1, 64 * 1024 * 1024);
+    let mut file = File::open(PathBuf::from(path)).map_err(|e| e.to_string())?;
+    let mut buffer = vec![0u8; safe_max];
+    let bytes_read = file.read(&mut buffer).map_err(|e| e.to_string())?;
+    buffer.truncate(bytes_read);
+    Ok(buffer)
+}
+
+#[tauri::command]
+fn read_file_bytes_range(path: String, offset: u64, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let safe_max = max_bytes.clamp(1, 64 * 1024 * 1024);
+    let mut file = File::open(PathBuf::from(path)).map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|e| e.to_string())?;
+    let mut buffer = vec![0u8; safe_max];
+    let bytes_read = file.read(&mut buffer).map_err(|e| e.to_string())?;
+    buffer.truncate(bytes_read);
+    Ok(buffer)
+}
+
+#[tauri::command]
+fn replace_file_bytes_range(
+    source_path: String,
+    target_path: String,
+    offset: u64,
+    delete_len: usize,
+    insert_bytes: Vec<u8>,
+) -> Result<(), String> {
+    let source = PathBuf::from(&source_path);
+    let target = PathBuf::from(&target_path);
+    let same_path = source == target;
+
+    let mut input = File::open(&source).map_err(|e| e.to_string())?;
+    let source_len = input.metadata().map_err(|e| e.to_string())?.len();
+    if offset > source_len {
+        return Err("offset out of range".to_string());
+    }
+    let delete_end = offset.saturating_add(delete_len as u64).min(source_len);
+
+    let temp_path = if same_path {
+        let parent = target
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        Some(parent.join(format!(
+            ".nmeditor_patch_{}_{}.tmp",
+            std::process::id(),
+            stamp
+        )))
+    } else {
+        None
+    };
+    let journal = if same_path {
+        let temp = temp_path
+            .as_ref()
+            .ok_or_else(|| "missing temp path for in-place patch".to_string())?;
+        Some(create_replace_journal(
+            &target,
+            temp,
+            "replace_file_bytes_range",
+        )?)
+    } else {
+        None
+    };
+
+    let write_path = temp_path.clone().unwrap_or_else(|| target.clone());
+    let write_result = (|| -> Result<(), String> {
+        let mut output = File::create(&write_path).map_err(|e| e.to_string())?;
+        {
+            let mut prefix = std::io::Read::by_ref(&mut input).take(offset);
+            std::io::copy(&mut prefix, &mut output).map_err(|e| e.to_string())?;
+        }
+        output.write_all(&insert_bytes).map_err(|e| e.to_string())?;
+        input
+            .seek(SeekFrom::Start(delete_end))
+            .map_err(|e| e.to_string())?;
+        std::io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
+        output.flush().map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        if let Some(journal) = journal.as_ref() {
+            cleanup_replace_journal(journal);
+        } else if let Some(temp) = temp_path {
+            let _ = fs::remove_file(temp);
+        }
+        return write_result;
+    }
+
+    if let Some(temp) = temp_path {
+        if fs::rename(&temp, &target).is_err() {
+            if target.exists() {
+                fs::remove_file(&target).map_err(|e| e.to_string())?;
+            }
+            if let Err(err) = fs::rename(&temp, &target) {
+                if let Some(journal) = journal.as_ref() {
+                    let _ = restore_target_from_replace_journal(journal);
+                    cleanup_replace_journal(journal);
+                }
+                return Err(err.to_string());
+            }
+        }
+    }
+    if let Some(journal) = journal.as_ref() {
+        cleanup_replace_journal(journal);
+    }
+
+    Ok(())
+}
 
 #[tauri::command]
 fn count_csv_rows(path: String, delimiter: Option<String>) -> Result<usize, String> {
@@ -1066,7 +2510,9 @@ fn count_csv_rows(path: String, delimiter: Option<String>) -> Result<usize, Stri
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .delimiter(delimiter_byte)
-        .from_reader(BufReader::new(File::open(&path_buf).map_err(|e| e.to_string())?));
+        .from_reader(BufReader::new(
+            File::open(&path_buf).map_err(|e| e.to_string())?,
+        ));
 
     let _ = reader.headers().map_err(|e| e.to_string())?;
 
@@ -1151,7 +2597,11 @@ fn apply_column_ops_to_row(row: &mut Vec<String>, column_ops: &[ColumnOp]) {
             ColumnOp::Rename { .. } => {}
             ColumnOp::Duplicate { index, from, .. } => {
                 let idx = (*index).min(row.len());
-                let source = if *from < row.len() { row[*from].clone() } else { String::new() };
+                let source = if *from < row.len() {
+                    row[*from].clone()
+                } else {
+                    String::new()
+                };
                 row.insert(idx, source);
             }
         }
@@ -1170,6 +2620,7 @@ fn build_patch_map(patches: &[CsvPatch]) -> HashMap<usize, HashMap<usize, String
 }
 
 fn row_matches_filters(row: &[String], filters: &[FilterRule]) -> bool {
+    const IN_FILTER_PREFIX: &str = "@in-json:";
     for rule in filters {
         if rule.value.is_empty() {
             continue;
@@ -1177,7 +2628,15 @@ fn row_matches_filters(row: &[String], filters: &[FilterRule]) -> bool {
         if rule.column >= row.len() {
             return false;
         }
-        if !row[rule.column].contains(&rule.value) {
+        if let Some(raw) = rule.value.strip_prefix(IN_FILTER_PREFIX) {
+            let targets: Vec<String> = serde_json::from_str(raw).unwrap_or_default();
+            if targets.is_empty() {
+                return false;
+            }
+            if !targets.iter().any(|target| row[rule.column] == *target) {
+                return false;
+            }
+        } else if !row[rule.column].contains(&rule.value) {
             return false;
         }
     }
@@ -1202,9 +2661,7 @@ fn compare_rows(a: &[String], b: &[String], rules: &[SortRule]) -> CmpOrdering {
         let b_value = b.get(rule.column).map(|s| s.as_str()).unwrap_or("");
 
         let order = match (a_value.parse::<f64>(), b_value.parse::<f64>()) {
-            (Ok(a_num), Ok(b_num)) => a_num
-                .partial_cmp(&b_num)
-                .unwrap_or(CmpOrdering::Equal),
+            (Ok(a_num), Ok(b_num)) => a_num.partial_cmp(&b_num).unwrap_or(CmpOrdering::Equal),
             _ => a_value.to_lowercase().cmp(&b_value.to_lowercase()),
         };
 
@@ -1550,7 +3007,9 @@ fn save_csv_with_patches(
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .delimiter(delimiter_byte)
-        .from_reader(BufReader::new(File::open(&path).map_err(|e| e.to_string())?));
+        .from_reader(BufReader::new(
+            File::open(&path).map_err(|e| e.to_string())?,
+        ));
 
     let mut headers = reader
         .headers()
@@ -1726,7 +3185,9 @@ fn apply_macro_to_file(
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .delimiter(delimiter_byte)
-        .from_reader(BufReader::new(File::open(&path).map_err(|e| e.to_string())?));
+        .from_reader(BufReader::new(
+            File::open(&path).map_err(|e| e.to_string())?,
+        ));
 
     let headers = reader
         .headers()
@@ -1805,7 +3266,9 @@ fn compute_column_stats(
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .delimiter(delimiter_byte)
-        .from_reader(BufReader::new(File::open(&path).map_err(|e| e.to_string())?));
+        .from_reader(BufReader::new(
+            File::open(&path).map_err(|e| e.to_string())?,
+        ));
 
     let headers = reader
         .headers()
@@ -1906,7 +3369,9 @@ fn apply_find_replace_to_file(
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(true)
         .delimiter(delimiter_byte)
-        .from_reader(BufReader::new(File::open(&path).map_err(|e| e.to_string())?));
+        .from_reader(BufReader::new(
+            File::open(&path).map_err(|e| e.to_string())?,
+        ));
 
     let headers = reader
         .headers()
@@ -1925,13 +3390,30 @@ fn apply_find_replace_to_file(
     writer.write_record(&headers).map_err(|e| e.to_string())?;
 
     let mut applied = 0usize;
-    let regex = if spec.regex {
-        let flags = if spec.match_case { "g" } else { "gi" };
-        let pattern = format!("(?{}){}", flags, spec.find);
-        regex::Regex::new(&pattern).map_err(|e| e.to_string())?
+    let regex_pattern = if spec.regex {
+        if spec.match_case {
+            spec.find.clone()
+        } else {
+            format!("(?i){}", spec.find)
+        }
     } else {
-        regex::Regex::new("$")
-            .map_err(|e| e.to_string())?
+        String::new()
+    };
+    let regex = if spec.regex {
+        Some(regex::Regex::new(&regex_pattern).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    let literal_ci = if !spec.regex && !spec.match_case {
+        let escaped = regex::escape(&spec.find);
+        Some(
+            regex::RegexBuilder::new(&escaped)
+                .case_insensitive(true)
+                .build()
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
     };
 
     for record in reader.records() {
@@ -1946,17 +3428,14 @@ fn apply_find_replace_to_file(
                 continue;
             }
             let current = row[col].clone();
-            let next = if spec.regex {
-                regex.replace_all(&current, spec.replace.as_str()).to_string()
+            let next = if let Some(re) = &regex {
+                re.replace_all(&current, spec.replace.as_str()).to_string()
             } else if spec.match_case {
                 current.replace(&spec.find, &spec.replace)
-            } else {
-                let escaped = regex::escape(&spec.find);
-                let ci = regex::RegexBuilder::new(&escaped)
-                    .case_insensitive(true)
-                    .build()
-                    .map_err(|e| e.to_string())?;
+            } else if let Some(ci) = &literal_ci {
                 ci.replace_all(&current, spec.replace.as_str()).to_string()
+            } else {
+                current.clone()
             };
             if next != current {
                 row[col] = next;
@@ -1982,6 +3461,993 @@ fn apply_find_replace_to_file(
     })
 }
 
+fn scan_find_matches_from_path(
+    path: &str,
+    delimiter_byte: u8,
+    has_headers: bool,
+    data_col_offset: usize,
+    find: &str,
+    regex: bool,
+    match_case: bool,
+    column: Option<usize>,
+    start_row: usize,
+    end_row: Option<usize>,
+    max_matches: usize,
+) -> Result<FindMatchesResult, String> {
+    let started_at = Instant::now();
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(has_headers)
+        .delimiter(delimiter_byte)
+        .from_reader(BufReader::new(File::open(path).map_err(|e| e.to_string())?));
+    if has_headers {
+        reader.headers().map_err(|e| e.to_string())?;
+    }
+
+    let regex_pattern = if regex {
+        if match_case {
+            find.to_string()
+        } else {
+            format!("(?i){}", find)
+        }
+    } else {
+        String::new()
+    };
+    let regex_re = if regex {
+        Some(regex::Regex::new(&regex_pattern).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    let literal_ci = if !regex && !match_case {
+        let escaped = regex::escape(find);
+        Some(
+            regex::RegexBuilder::new(&escaped)
+                .case_insensitive(true)
+                .build()
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+
+    let mut matches = Vec::new();
+    let mut has_more = false;
+    let mut scanned_rows = 0usize;
+    for (row_index, record) in reader.records().enumerate() {
+        scanned_rows = scanned_rows.saturating_add(1);
+        if row_index < start_row {
+            continue;
+        }
+        if let Some(end) = end_row {
+            if row_index > end {
+                break;
+            }
+        }
+
+        let record = record.map_err(|e| e.to_string())?;
+        let data_cols = record.len().saturating_sub(data_col_offset);
+        let columns: Vec<usize> = match column {
+            Some(col) => vec![col],
+            None => (0..data_cols).collect(),
+        };
+        for col in columns {
+            let storage_col = col + data_col_offset;
+            if storage_col >= record.len() {
+                continue;
+            }
+            let value = record.get(storage_col).unwrap_or("");
+            let matched = if let Some(re) = &regex_re {
+                re.is_match(value)
+            } else if match_case {
+                value.contains(find)
+            } else if let Some(ci) = &literal_ci {
+                ci.is_match(value)
+            } else {
+                false
+            };
+            if !matched {
+                continue;
+            }
+            matches.push(FindMatchEntry {
+                row: row_index,
+                col,
+                value: value.to_string(),
+            });
+            if matches.len() > max_matches {
+                has_more = true;
+                matches.truncate(max_matches);
+                break;
+            }
+        }
+        if has_more {
+            break;
+        }
+    }
+
+    Ok(FindMatchesResult {
+        matches,
+        has_more,
+        scanned_rows,
+        elapsed_ms: started_at.elapsed().as_millis() as u64,
+    })
+}
+
+#[tauri::command]
+fn find_matches_in_file(
+    path: String,
+    delimiter: String,
+    find: String,
+    regex: bool,
+    match_case: bool,
+    column: Option<usize>,
+    start_row: Option<usize>,
+    end_row: Option<usize>,
+    max_matches: Option<usize>,
+) -> Result<FindMatchesResult, String> {
+    if find.is_empty() {
+        return Err("Find text is required.".to_string());
+    }
+
+    let start = start_row.unwrap_or(0);
+    if let Some(end) = end_row {
+        if end < start {
+            return Err("Row range is invalid.".to_string());
+        }
+    }
+    scan_find_matches_from_path(
+        &path,
+        parse_delimiter(&delimiter),
+        true,
+        0,
+        &find,
+        regex,
+        match_case,
+        column,
+        start,
+        end_row,
+        max_matches.unwrap_or(2000).clamp(1, 20000),
+    )
+}
+
+#[tauri::command]
+fn find_matches_in_global_view(
+    state: tauri::State<AppState>,
+    view_id: u64,
+    find: String,
+    regex: bool,
+    match_case: bool,
+    column: Option<usize>,
+    start_row: Option<usize>,
+    end_row: Option<usize>,
+    max_matches: Option<usize>,
+) -> Result<FindMatchesResult, String> {
+    if find.is_empty() {
+        return Err("Find text is required.".to_string());
+    }
+
+    let (temp_path, delimiter) = {
+        let views = state.views.lock().map_err(|_| "lock poisoned")?;
+        let view = views
+            .get(&view_id)
+            .ok_or_else(|| "view not found".to_string())?;
+        match &view.mode {
+            GlobalViewMode::TempFile(path) => (path.clone(), view.delimiter),
+        }
+    };
+
+    let start = start_row.unwrap_or(0);
+    if let Some(end) = end_row {
+        if end < start {
+            return Err("Row range is invalid.".to_string());
+        }
+    }
+    scan_find_matches_from_path(
+        &temp_path,
+        delimiter,
+        false,
+        1,
+        &find,
+        regex,
+        match_case,
+        column,
+        start,
+        end_row,
+        max_matches.unwrap_or(2000).clamp(1, 20000),
+    )
+}
+
+#[tauri::command]
+fn start_find_matches_in_file_job(
+    state: tauri::State<AppState>,
+    path: String,
+    delimiter: String,
+    find: String,
+    regex: bool,
+    match_case: bool,
+    column: Option<usize>,
+    start_row: Option<usize>,
+    end_row: Option<usize>,
+    max_matches: Option<usize>,
+) -> Result<StartFindMatchesResponse, String> {
+    if find.is_empty() {
+        return Err("Find text is required.".to_string());
+    }
+    let start = start_row.unwrap_or(0);
+    if let Some(end) = end_row {
+        if end < start {
+            return Err("Row range is invalid.".to_string());
+        }
+    }
+
+    let delimiter_byte = parse_delimiter(&delimiter);
+    let limit = max_matches.unwrap_or(2000).clamp(1, 20000);
+    let job_id = state.next_find_job.fetch_add(1, Ordering::Relaxed);
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+
+    {
+        let mut jobs = state.find_jobs.lock().map_err(|_| "lock poisoned")?;
+        prune_find_jobs(&mut jobs);
+        jobs.insert(
+            job_id,
+            FindJob {
+                progress: 0.0,
+                done: false,
+                canceled: false,
+                has_more: false,
+                matched_count: 0,
+                scanned_rows: 0,
+                elapsed_ms: 0,
+                matches: Vec::new(),
+                error: None,
+                cancel_flag: cancel_flag.clone(),
+            },
+        );
+    }
+
+    let jobs = state.find_jobs.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let started_at = Instant::now();
+        let mut scanned_rows = 0usize;
+        let mut matched_count = 0usize;
+        let result = (|| -> Result<FindMatchesResult, String> {
+            let file_len = fs::metadata(&path).map_err(|e| e.to_string())?.len().max(1);
+            let mut reader = csv::ReaderBuilder::new()
+                .has_headers(true)
+                .delimiter(delimiter_byte)
+                .from_reader(BufReader::new(
+                    File::open(&path).map_err(|e| e.to_string())?,
+                ));
+            reader.headers().map_err(|e| e.to_string())?;
+
+            let regex_pattern = if regex {
+                if match_case {
+                    find.clone()
+                } else {
+                    format!("(?i){}", find)
+                }
+            } else {
+                String::new()
+            };
+            let regex_re = if regex {
+                Some(regex::Regex::new(&regex_pattern).map_err(|e| e.to_string())?)
+            } else {
+                None
+            };
+            let literal_ci = if !regex && !match_case {
+                let escaped = regex::escape(&find);
+                Some(
+                    regex::RegexBuilder::new(&escaped)
+                        .case_insensitive(true)
+                        .build()
+                        .map_err(|e| e.to_string())?,
+                )
+            } else {
+                None
+            };
+
+            let mut matches = Vec::new();
+            let mut has_more = false;
+            let mut record = csv::StringRecord::new();
+            let mut row_index = 0usize;
+            let mut last_progress = 0.0f32;
+            loop {
+                if is_find_job_canceled(&jobs, job_id) {
+                    return Err("canceled".to_string());
+                }
+                if !reader.read_record(&mut record).map_err(|e| e.to_string())? {
+                    break;
+                }
+                scanned_rows = scanned_rows.saturating_add(1);
+                if row_index < start {
+                    row_index += 1;
+                    continue;
+                }
+                if let Some(end) = end_row {
+                    if row_index > end {
+                        break;
+                    }
+                }
+
+                let columns: Vec<usize> = match column {
+                    Some(col) => vec![col],
+                    None => (0..record.len()).collect(),
+                };
+                for col in columns {
+                    if col >= record.len() {
+                        continue;
+                    }
+                    let value = record.get(col).unwrap_or("");
+                    let matched = if let Some(re) = &regex_re {
+                        re.is_match(value)
+                    } else if match_case {
+                        value.contains(&find)
+                    } else if let Some(ci) = &literal_ci {
+                        ci.is_match(value)
+                    } else {
+                        false
+                    };
+                    if !matched {
+                        continue;
+                    }
+                    matches.push(FindMatchEntry {
+                        row: row_index,
+                        col,
+                        value: value.to_string(),
+                    });
+                    matched_count = matched_count.saturating_add(1);
+                    if matches.len() > limit {
+                        has_more = true;
+                        matches.truncate(limit);
+                        break;
+                    }
+                }
+                if has_more {
+                    break;
+                }
+
+                row_index += 1;
+                let progress = (reader.position().byte() as f32 / file_len as f32).clamp(0.0, 0.98);
+                if progress - last_progress >= 0.01 {
+                    last_progress = progress;
+                    update_find_job(&jobs, job_id, |job| {
+                        if !job.done {
+                            job.progress = progress;
+                            job.matched_count = matched_count;
+                            job.scanned_rows = scanned_rows;
+                        }
+                    });
+                }
+            }
+            Ok(FindMatchesResult {
+                matches,
+                has_more,
+                scanned_rows,
+                elapsed_ms: started_at.elapsed().as_millis() as u64,
+            })
+        })();
+
+        match result {
+            Ok(data) => {
+                update_find_job(&jobs, job_id, |job| {
+                    job.progress = 1.0;
+                    job.done = true;
+                    job.canceled = false;
+                    job.has_more = data.has_more;
+                    job.matched_count = matched_count.min(data.matches.len());
+                    job.scanned_rows = data.scanned_rows;
+                    job.elapsed_ms = data.elapsed_ms;
+                    job.matches = data.matches;
+                    job.error = None;
+                });
+            }
+            Err(err) => {
+                if err == "canceled" {
+                    update_find_job(&jobs, job_id, |job| {
+                        job.done = true;
+                        job.canceled = true;
+                        job.matched_count = matched_count;
+                        job.scanned_rows = scanned_rows;
+                        job.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                    });
+                } else {
+                    update_find_job(&jobs, job_id, |job| {
+                        job.done = true;
+                        job.canceled = false;
+                        job.matched_count = matched_count;
+                        job.scanned_rows = scanned_rows;
+                        job.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                        job.error = Some(err);
+                    });
+                }
+            }
+        }
+    });
+
+    Ok(StartFindMatchesResponse {
+        job_id,
+        done: false,
+    })
+}
+
+#[tauri::command]
+fn start_find_text_in_file_job(
+    state: tauri::State<AppState>,
+    path: String,
+    find: String,
+    regex: bool,
+    match_case: bool,
+    encoding: Option<String>,
+    max_matches: Option<usize>,
+) -> Result<StartFindMatchesResponse, String> {
+    if find.is_empty() {
+        return Err("Find text is required.".to_string());
+    }
+
+    let limit = max_matches.unwrap_or(2000).clamp(1, 20000);
+    let encoding = encoding.unwrap_or_else(|| "UTF-8".to_string());
+    let job_id = state.next_find_job.fetch_add(1, Ordering::Relaxed);
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+
+    {
+        let mut jobs = state.find_jobs.lock().map_err(|_| "lock poisoned")?;
+        prune_find_jobs(&mut jobs);
+        jobs.insert(
+            job_id,
+            FindJob {
+                progress: 0.0,
+                done: false,
+                canceled: false,
+                has_more: false,
+                matched_count: 0,
+                scanned_rows: 0,
+                elapsed_ms: 0,
+                matches: Vec::new(),
+                error: None,
+                cancel_flag: cancel_flag.clone(),
+            },
+        );
+    }
+
+    let jobs = state.find_jobs.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let started_at = Instant::now();
+        let mut matched_count = 0usize;
+        let mut scanned_bytes = 0usize;
+        let result = if regex {
+            scan_text_regex_matches(
+                &path,
+                &find,
+                match_case,
+                &encoding,
+                limit,
+                || is_find_job_canceled(&jobs, job_id),
+                |progress, matched, scanned| {
+                    matched_count = matched;
+                    scanned_bytes = scanned;
+                    update_find_job(&jobs, job_id, |job| {
+                        if !job.done {
+                            job.progress = progress;
+                            job.matched_count = matched_count;
+                            job.scanned_rows = scanned_bytes;
+                        }
+                    });
+                },
+                |new_matches| {
+                    if new_matches.is_empty() {
+                        return;
+                    }
+                    update_find_job(&jobs, job_id, |job| {
+                        if job.done {
+                            return;
+                        }
+                        job.matches.extend_from_slice(new_matches);
+                    });
+                },
+            )
+        } else {
+            scan_text_literal_matches(
+                &path,
+                &find,
+                match_case,
+                &encoding,
+                limit,
+                || is_find_job_canceled(&jobs, job_id),
+                |progress, matched, scanned| {
+                    matched_count = matched;
+                    scanned_bytes = scanned;
+                    update_find_job(&jobs, job_id, |job| {
+                        if !job.done {
+                            job.progress = progress;
+                            job.matched_count = matched_count;
+                            job.scanned_rows = scanned_bytes;
+                        }
+                    });
+                },
+                |new_matches| {
+                    if new_matches.is_empty() {
+                        return;
+                    }
+                    update_find_job(&jobs, job_id, |job| {
+                        if job.done {
+                            return;
+                        }
+                        job.matches.extend_from_slice(new_matches);
+                    });
+                },
+            )
+        };
+
+        match result {
+            Ok(data) => {
+                update_find_job(&jobs, job_id, |job| {
+                    job.progress = 1.0;
+                    job.done = true;
+                    job.canceled = false;
+                    job.has_more = data.has_more;
+                    job.matched_count = matched_count.max(data.matches.len());
+                    job.scanned_rows = data.scanned_rows;
+                    job.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                    job.matches = data.matches;
+                    job.error = None;
+                });
+            }
+            Err(err) => {
+                if err == "canceled" {
+                    update_find_job(&jobs, job_id, |job| {
+                        job.done = true;
+                        job.canceled = true;
+                        job.matched_count = matched_count;
+                        job.scanned_rows = scanned_bytes;
+                        job.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                    });
+                } else {
+                    update_find_job(&jobs, job_id, |job| {
+                        job.done = true;
+                        job.canceled = false;
+                        job.matched_count = matched_count;
+                        job.scanned_rows = scanned_bytes;
+                        job.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                        job.error = Some(err);
+                    });
+                }
+            }
+        }
+    });
+
+    Ok(StartFindMatchesResponse {
+        job_id,
+        done: false,
+    })
+}
+
+#[tauri::command]
+fn start_replace_text_in_file_job(
+    state: tauri::State<AppState>,
+    path: String,
+    find: String,
+    replace: String,
+    regex: bool,
+    match_case: bool,
+    preserve_case: Option<bool>,
+    encoding: Option<String>,
+    target_path: Option<String>,
+) -> Result<StartFindMatchesResponse, String> {
+    if find.is_empty() {
+        return Err("Find text is required.".to_string());
+    }
+
+    let preserve_case = preserve_case.unwrap_or(false);
+    if regex && preserve_case {
+        return Err("Preserve case is not supported for regex file replace.".to_string());
+    }
+    let encoding = encoding.unwrap_or_else(|| "UTF-8".to_string());
+    let target = target_path.unwrap_or_else(|| path.clone());
+    let job_id = state.next_find_job.fetch_add(1, Ordering::Relaxed);
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+
+    {
+        let mut jobs = state.find_jobs.lock().map_err(|_| "lock poisoned")?;
+        prune_find_jobs(&mut jobs);
+        jobs.insert(
+            job_id,
+            FindJob {
+                progress: 0.0,
+                done: false,
+                canceled: false,
+                has_more: false,
+                matched_count: 0,
+                scanned_rows: 0,
+                elapsed_ms: 0,
+                matches: Vec::new(),
+                error: None,
+                cancel_flag: cancel_flag.clone(),
+            },
+        );
+    }
+
+    let jobs = state.find_jobs.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let started_at = Instant::now();
+        let mut replaced_count = 0usize;
+        let mut scanned_bytes = 0usize;
+        let result = if regex {
+            replace_text_regex_in_file(
+                &path,
+                &target,
+                &find,
+                &replace,
+                match_case,
+                &encoding,
+                || is_find_job_canceled(&jobs, job_id),
+                |progress, replaced, scanned| {
+                    replaced_count = replaced;
+                    scanned_bytes = scanned;
+                    update_find_job(&jobs, job_id, |job| {
+                        if !job.done {
+                            job.progress = progress;
+                            job.matched_count = replaced_count;
+                            job.scanned_rows = scanned_bytes;
+                        }
+                    });
+                },
+            )
+        } else {
+            replace_text_literal_in_file(
+                &path,
+                &target,
+                &find,
+                &replace,
+                match_case,
+                preserve_case,
+                &encoding,
+                || is_find_job_canceled(&jobs, job_id),
+                |progress, replaced, scanned| {
+                    replaced_count = replaced;
+                    scanned_bytes = scanned;
+                    update_find_job(&jobs, job_id, |job| {
+                        if !job.done {
+                            job.progress = progress;
+                            job.matched_count = replaced_count;
+                            job.scanned_rows = scanned_bytes;
+                        }
+                    });
+                },
+            )
+        };
+
+        match result {
+            Ok((final_replaced_count, final_scanned_bytes)) => {
+                update_find_job(&jobs, job_id, |job| {
+                    job.progress = 1.0;
+                    job.done = true;
+                    job.canceled = false;
+                    job.has_more = false;
+                    job.matched_count = final_replaced_count;
+                    job.scanned_rows = final_scanned_bytes;
+                    job.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                    job.matches = Vec::new();
+                    job.error = None;
+                });
+            }
+            Err(err) => {
+                if err == "canceled" {
+                    update_find_job(&jobs, job_id, |job| {
+                        job.done = true;
+                        job.canceled = true;
+                        job.matched_count = replaced_count;
+                        job.scanned_rows = scanned_bytes;
+                        job.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                    });
+                } else {
+                    update_find_job(&jobs, job_id, |job| {
+                        job.done = true;
+                        job.canceled = false;
+                        job.matched_count = replaced_count;
+                        job.scanned_rows = scanned_bytes;
+                        job.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                        job.error = Some(err);
+                    });
+                }
+            }
+        }
+    });
+
+    Ok(StartFindMatchesResponse {
+        job_id,
+        done: false,
+    })
+}
+
+#[tauri::command]
+fn start_find_matches_in_global_view_job(
+    state: tauri::State<AppState>,
+    view_id: u64,
+    find: String,
+    regex: bool,
+    match_case: bool,
+    column: Option<usize>,
+    start_row: Option<usize>,
+    end_row: Option<usize>,
+    max_matches: Option<usize>,
+) -> Result<StartFindMatchesResponse, String> {
+    if find.is_empty() {
+        return Err("Find text is required.".to_string());
+    }
+    let start = start_row.unwrap_or(0);
+    if let Some(end) = end_row {
+        if end < start {
+            return Err("Row range is invalid.".to_string());
+        }
+    }
+
+    let (temp_path, delimiter) = {
+        let views = state.views.lock().map_err(|_| "lock poisoned")?;
+        let view = views
+            .get(&view_id)
+            .ok_or_else(|| "view not found".to_string())?;
+        match &view.mode {
+            GlobalViewMode::TempFile(path) => (path.clone(), view.delimiter),
+        }
+    };
+    let limit = max_matches.unwrap_or(2000).clamp(1, 20000);
+    let job_id = state.next_find_job.fetch_add(1, Ordering::Relaxed);
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut jobs = state.find_jobs.lock().map_err(|_| "lock poisoned")?;
+        prune_find_jobs(&mut jobs);
+        jobs.insert(
+            job_id,
+            FindJob {
+                progress: 0.0,
+                done: false,
+                canceled: false,
+                has_more: false,
+                matched_count: 0,
+                scanned_rows: 0,
+                elapsed_ms: 0,
+                matches: Vec::new(),
+                error: None,
+                cancel_flag: cancel_flag.clone(),
+            },
+        );
+    }
+
+    let jobs = state.find_jobs.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let started_at = Instant::now();
+        let mut scanned_rows = 0usize;
+        let mut matched_count = 0usize;
+        let result = (|| -> Result<FindMatchesResult, String> {
+            let file_len = fs::metadata(&temp_path)
+                .map_err(|e| e.to_string())?
+                .len()
+                .max(1);
+            let mut reader = csv::ReaderBuilder::new()
+                .has_headers(false)
+                .delimiter(delimiter)
+                .from_reader(BufReader::new(
+                    File::open(&temp_path).map_err(|e| e.to_string())?,
+                ));
+
+            let regex_pattern = if regex {
+                if match_case {
+                    find.clone()
+                } else {
+                    format!("(?i){}", find)
+                }
+            } else {
+                String::new()
+            };
+            let regex_re = if regex {
+                Some(regex::Regex::new(&regex_pattern).map_err(|e| e.to_string())?)
+            } else {
+                None
+            };
+            let literal_ci = if !regex && !match_case {
+                let escaped = regex::escape(&find);
+                Some(
+                    regex::RegexBuilder::new(&escaped)
+                        .case_insensitive(true)
+                        .build()
+                        .map_err(|e| e.to_string())?,
+                )
+            } else {
+                None
+            };
+
+            let mut matches = Vec::new();
+            let mut has_more = false;
+            let mut record = csv::StringRecord::new();
+            let mut view_row = 0usize;
+            let mut last_progress = 0.0f32;
+            loop {
+                if is_find_job_canceled(&jobs, job_id) {
+                    return Err("canceled".to_string());
+                }
+                if !reader.read_record(&mut record).map_err(|e| e.to_string())? {
+                    break;
+                }
+                scanned_rows = scanned_rows.saturating_add(1);
+                if view_row < start {
+                    view_row += 1;
+                    continue;
+                }
+                if let Some(end) = end_row {
+                    if view_row > end {
+                        break;
+                    }
+                }
+
+                let data_cols = record.len().saturating_sub(1);
+                let columns: Vec<usize> = match column {
+                    Some(col) => vec![col],
+                    None => (0..data_cols).collect(),
+                };
+                for col in columns {
+                    let storage_col = col + 1;
+                    if storage_col >= record.len() {
+                        continue;
+                    }
+                    let value = record.get(storage_col).unwrap_or("");
+                    let matched = if let Some(re) = &regex_re {
+                        re.is_match(value)
+                    } else if match_case {
+                        value.contains(&find)
+                    } else if let Some(ci) = &literal_ci {
+                        ci.is_match(value)
+                    } else {
+                        false
+                    };
+                    if !matched {
+                        continue;
+                    }
+                    matches.push(FindMatchEntry {
+                        row: view_row,
+                        col,
+                        value: value.to_string(),
+                    });
+                    matched_count = matched_count.saturating_add(1);
+                    if matches.len() > limit {
+                        has_more = true;
+                        matches.truncate(limit);
+                        break;
+                    }
+                }
+                if has_more {
+                    break;
+                }
+
+                view_row += 1;
+                let progress = (reader.position().byte() as f32 / file_len as f32).clamp(0.0, 0.98);
+                if progress - last_progress >= 0.01 {
+                    last_progress = progress;
+                    update_find_job(&jobs, job_id, |job| {
+                        if !job.done {
+                            job.progress = progress;
+                            job.matched_count = matched_count;
+                            job.scanned_rows = scanned_rows;
+                        }
+                    });
+                }
+            }
+            Ok(FindMatchesResult {
+                matches,
+                has_more,
+                scanned_rows,
+                elapsed_ms: started_at.elapsed().as_millis() as u64,
+            })
+        })();
+
+        match result {
+            Ok(data) => {
+                update_find_job(&jobs, job_id, |job| {
+                    job.progress = 1.0;
+                    job.done = true;
+                    job.canceled = false;
+                    job.has_more = data.has_more;
+                    job.matched_count = matched_count.min(data.matches.len());
+                    job.scanned_rows = data.scanned_rows;
+                    job.elapsed_ms = data.elapsed_ms;
+                    job.matches = data.matches;
+                    job.error = None;
+                });
+            }
+            Err(err) => {
+                if err == "canceled" {
+                    update_find_job(&jobs, job_id, |job| {
+                        job.done = true;
+                        job.canceled = true;
+                        job.matched_count = matched_count;
+                        job.scanned_rows = scanned_rows;
+                        job.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                    });
+                } else {
+                    update_find_job(&jobs, job_id, |job| {
+                        job.done = true;
+                        job.canceled = false;
+                        job.matched_count = matched_count;
+                        job.scanned_rows = scanned_rows;
+                        job.elapsed_ms = started_at.elapsed().as_millis() as u64;
+                        job.error = Some(err);
+                    });
+                }
+            }
+        }
+    });
+
+    Ok(StartFindMatchesResponse {
+        job_id,
+        done: false,
+    })
+}
+
+#[tauri::command]
+fn get_find_matches_job_status(
+    state: tauri::State<AppState>,
+    job_id: u64,
+    consume_from: Option<usize>,
+    consume_limit: Option<usize>,
+) -> Result<FindMatchesJobStatus, String> {
+    let mut jobs = state.find_jobs.lock().map_err(|_| "lock poisoned")?;
+    let job = jobs
+        .get(&job_id)
+        .ok_or_else(|| "job not found".to_string())?;
+    let stream_mode = consume_from.is_some() || consume_limit.is_some();
+    let consume_from = consume_from.unwrap_or(0);
+    let consume_limit = consume_limit.unwrap_or(400).clamp(1, 10_000);
+    let (matches, matches_offset, matches_total) = if stream_mode {
+        let total = job.matches.len();
+        let start = consume_from.min(total);
+        let end = start.saturating_add(consume_limit).min(total);
+        (
+            Some(job.matches[start..end].to_vec()),
+            Some(start),
+            Some(total),
+        )
+    } else if job.done && !job.canceled && job.error.is_none() {
+        (Some(job.matches.clone()), Some(0), Some(job.matches.len()))
+    } else {
+        (None, None, Some(job.matches.len()))
+    };
+    let status = FindMatchesJobStatus {
+        job_id,
+        progress: job.progress,
+        done: job.done,
+        canceled: job.canceled,
+        has_more: job.has_more,
+        matched_count: job.matched_count,
+        scanned_rows: job.scanned_rows,
+        elapsed_ms: job.elapsed_ms,
+        matches,
+        matches_offset,
+        matches_total,
+        error: job.error.clone(),
+    };
+    let should_remove = if !status.done {
+        false
+    } else if !stream_mode {
+        true
+    } else {
+        let delivered = status.matches_offset.unwrap_or(0)
+            + status.matches.as_ref().map(|m| m.len()).unwrap_or(0);
+        let total = status.matches_total.unwrap_or(0);
+        delivered >= total
+    };
+    if should_remove {
+        jobs.remove(&job_id);
+    }
+    Ok(status)
+}
+
+#[tauri::command]
+fn cancel_find_matches_job(state: tauri::State<AppState>, job_id: u64) -> Result<bool, String> {
+    let jobs = state.find_jobs.lock().map_err(|_| "lock poisoned")?;
+    if let Some(job) = jobs.get(&job_id) {
+        job.cancel_flag.store(true, Ordering::Relaxed);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 #[tauri::command]
 fn build_global_view(
     state: tauri::State<AppState>,
@@ -1995,10 +4461,12 @@ fn build_global_view(
     clear_rows: Vec<usize>,
     clear_cols: Vec<usize>,
     memory_limit_mb: Option<u64>,
+    force_external_sort: Option<bool>,
 ) -> Result<GlobalViewResponse, String> {
     let delimiter_byte = parse_delimiter(&delimiter);
     let limit_mb = memory_limit_mb.unwrap_or(300);
     let limit_bytes = limit_mb.saturating_mul(1024 * 1024);
+    let force_external_sort = force_external_sort.unwrap_or(false);
     let path_buf = PathBuf::from(&path);
     let file_len = fs::metadata(&path_buf).map_err(|e| e.to_string())?.len();
 
@@ -2006,7 +4474,9 @@ fn build_global_view(
     let clear_row_set: HashSet<usize> = clear_rows.into_iter().collect();
     let clear_col_set: HashSet<usize> = clear_cols.into_iter().collect();
 
-    let (mode, total_rows, index_key_for_view) = if file_len > limit_bytes && !sort_rules.is_empty() {
+    let (mode, total_rows, index_key_for_view) = if (force_external_sort || file_len > limit_bytes)
+        && !sort_rules.is_empty()
+    {
         let temp_dir = std::env::temp_dir();
         let chunk_limit = (limit_bytes.saturating_mul(60) / 100) as usize;
         let mut chunk: Vec<(usize, Vec<String>)> = Vec::new();
@@ -2030,7 +4500,8 @@ fn build_global_view(
                 chunk_bytes = chunk_bytes.saturating_add(row_bytes);
                 chunk.push((row_index, row));
                 if chunk_bytes >= chunk_limit && !chunk.is_empty() {
-                    let path = write_run_file(&temp_dir, run_id, delimiter_byte, &sort_rules, &mut chunk)?;
+                    let path =
+                        write_run_file(&temp_dir, run_id, delimiter_byte, &sort_rules, &mut chunk)?;
                     runs.push(path);
                     run_id += 1;
                     chunk_bytes = 0;
@@ -2280,6 +4751,118 @@ fn read_global_view_rows(
 }
 
 #[tauri::command]
+fn list_column_value_counts(
+    state: tauri::State<AppState>,
+    path: Option<String>,
+    delimiter: Option<String>,
+    view_id: Option<u64>,
+    column: usize,
+    query: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    patches: Option<Vec<CsvPatch>>,
+    row_ops: Option<Vec<RowOp>>,
+    column_ops: Option<Vec<ColumnOp>>,
+    clear_rows: Option<Vec<usize>>,
+    clear_cols: Option<Vec<usize>>,
+) -> Result<ColumnValueCountsResult, String> {
+    const MAX_DISTINCT_TRACKED: usize = 50_000;
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut truncated = false;
+    let mut scanned_rows = 0usize;
+    let query_lower = query.unwrap_or_default().trim().to_lowercase();
+    let has_query = !query_lower.is_empty();
+
+    let mut push_value = |value: String| {
+        if has_query && !value.to_lowercase().contains(&query_lower) {
+            return;
+        }
+        if let Some(entry) = counts.get_mut(&value) {
+            *entry += 1;
+            return;
+        }
+        if counts.len() >= MAX_DISTINCT_TRACKED {
+            truncated = true;
+            return;
+        }
+        counts.insert(value, 1);
+    };
+
+    if let Some(view_id) = view_id {
+        let views = state.views.lock().map_err(|_| "lock poisoned")?;
+        let view = views
+            .get(&view_id)
+            .ok_or_else(|| "view not found".to_string())?;
+        let (temp_path, delimiter_byte) = match &view.mode {
+            GlobalViewMode::TempFile(path) => (path.clone(), view.delimiter),
+        };
+        drop(views);
+
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .delimiter(delimiter_byte)
+            .from_reader(BufReader::new(
+                File::open(PathBuf::from(temp_path)).map_err(|e| e.to_string())?,
+            ));
+        for record in reader.records() {
+            let record = record.map_err(|e| e.to_string())?;
+            scanned_rows += 1;
+            let value = record.get(column + 1).unwrap_or("").to_string();
+            push_value(value);
+        }
+    } else {
+        let path = path.ok_or_else(|| "path is required when view_id is missing".to_string())?;
+        let path_buf = PathBuf::from(path);
+        let delimiter_byte = parse_delimiter(delimiter.as_deref().unwrap_or(","));
+        let patch_map = build_patch_map(&patches.unwrap_or_default());
+        let row_ops = row_ops.unwrap_or_default();
+        let column_ops = column_ops.unwrap_or_default();
+        let clear_rows: HashSet<usize> = clear_rows.unwrap_or_default().into_iter().collect();
+        let clear_cols: HashSet<usize> = clear_cols.unwrap_or_default().into_iter().collect();
+
+        stream_rows_with_ops(
+            &path_buf,
+            delimiter_byte,
+            &row_ops,
+            &column_ops,
+            &patch_map,
+            &clear_rows,
+            &clear_cols,
+            |_, row| {
+                scanned_rows += 1;
+                let value = row.get(column).cloned().unwrap_or_default();
+                push_value(value);
+                Ok(())
+            },
+        )?;
+    }
+
+    let mut values: Vec<ColumnValueCount> = counts
+        .into_iter()
+        .map(|(value, count)| ColumnValueCount { value, count })
+        .collect();
+    values.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+
+    let safe_limit = limit.unwrap_or(120).clamp(1, 1000);
+    let safe_offset = offset.unwrap_or(0);
+    let total = values.len();
+    let has_more = safe_offset + safe_limit < total;
+    let values = values
+        .into_iter()
+        .skip(safe_offset)
+        .take(safe_limit)
+        .collect::<Vec<_>>();
+
+    Ok(ColumnValueCountsResult {
+        values,
+        has_more,
+        truncated,
+        scanned_rows,
+    })
+}
+
+#[tauri::command]
 fn release_global_view(state: tauri::State<AppState>, view_id: u64) -> Result<bool, String> {
     let view = {
         let mut views = state.views.lock().map_err(|_| "lock poisoned")?;
@@ -2300,6 +4883,11 @@ fn release_global_view(state: tauri::State<AppState>, view_id: u64) -> Result<bo
     Ok(false)
 }
 
+#[tauri::command]
+fn recover_replace_journals() -> Result<usize, String> {
+    recover_pending_replace_journals()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2309,6 +4897,8 @@ pub fn run() {
             indexes: Arc::new(Mutex::new(HashMap::new())),
             index_jobs: Arc::new(Mutex::new(HashMap::new())),
             next_index_job: AtomicU64::new(1),
+            find_jobs: Arc::new(Mutex::new(HashMap::new())),
+            next_find_job: AtomicU64::new(1),
             views: Mutex::new(HashMap::new()),
             next_view_id: AtomicU64::new(1),
         })
@@ -2316,6 +4906,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
+            if let Err(err) = recover_pending_replace_journals() {
+                eprintln!("recover replace journals failed: {}", err);
+            }
             #[cfg(desktop)]
             {
                 let menu = build_app_menu(app, "en")?;
@@ -2328,6 +4921,9 @@ pub fn run() {
             open_csv_session,
             read_csv_rows,
             read_csv_rows_window,
+            read_file_head_bytes,
+            read_file_bytes_range,
+            replace_file_bytes_range,
             start_prepare_csv_index,
             get_prepare_csv_index_status,
             cancel_prepare_csv_index,
@@ -2337,9 +4933,19 @@ pub fn run() {
             apply_macro_to_file,
             compute_column_stats,
             apply_find_replace_to_file,
+            find_matches_in_file,
+            find_matches_in_global_view,
+            start_find_matches_in_file_job,
+            start_find_text_in_file_job,
+            start_replace_text_in_file_job,
+            start_find_matches_in_global_view_job,
+            get_find_matches_job_status,
+            cancel_find_matches_job,
             build_global_view,
             read_global_view_rows,
+            list_column_value_counts,
             release_global_view,
+            recover_replace_journals,
             set_menu_locale
         ])
         .on_menu_event(|app, event| {
@@ -2370,4 +4976,556 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufWriter, Write};
+
+    fn make_test_state() -> AppState {
+        AppState {
+            sessions: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            indexes: Arc::new(Mutex::new(HashMap::new())),
+            index_jobs: Arc::new(Mutex::new(HashMap::new())),
+            next_index_job: AtomicU64::new(1),
+            find_jobs: Arc::new(Mutex::new(HashMap::new())),
+            next_find_job: AtomicU64::new(1),
+            views: Mutex::new(HashMap::new()),
+            next_view_id: AtomicU64::new(1),
+        }
+    }
+
+    fn temp_csv_path(tag: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        std::env::temp_dir().join(format!(
+            "deskcsv_{}_{}_{}.csv",
+            tag,
+            std::process::id(),
+            stamp
+        ))
+    }
+
+    fn temp_journal_dir(tag: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        std::env::temp_dir().join(format!(
+            "deskcsv_journal_{}_{}_{}",
+            tag,
+            std::process::id(),
+            stamp
+        ))
+    }
+
+    fn write_large_test_csv(path: &PathBuf, rows: usize, cols: usize) -> Result<(), String> {
+        let file = File::create(path).map_err(|e| e.to_string())?;
+        let mut writer = BufWriter::new(file);
+        let headers = (0..cols).map(|c| format!("c{}", c)).collect::<Vec<_>>();
+        writeln!(writer, "{}", headers.join(",")).map_err(|e| e.to_string())?;
+        for row in 0..rows {
+            let mut values = Vec::with_capacity(cols);
+            for col in 0..cols {
+                let value = match col {
+                    0 => format!("id_{}", row),
+                    1 => {
+                        if row % 97 == 0 {
+                            "needle".to_string()
+                        } else {
+                            format!("v{}", row % 1000)
+                        }
+                    }
+                    2 => format!("{}", (row * 17) % 100_000),
+                    _ => format!("r{}_c{}", row, col),
+                };
+                values.push(value);
+            }
+            writeln!(writer, "{}", values.join(",")).map_err(|e| e.to_string())?;
+        }
+        writer.flush().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn write_view_csv(path: &PathBuf) -> Result<(), String> {
+        let file = File::create(path).map_err(|e| e.to_string())?;
+        let mut writer = BufWriter::new(file);
+        // Global view temp format: [original_row_index, data_col0, data_col1, ...]
+        writeln!(writer, "needle_in_index,alpha,beta").map_err(|e| e.to_string())?;
+        writeln!(writer, "idx2,needle_data,beta").map_err(|e| e.to_string())?;
+        writeln!(writer, "idx3,alpha,beta").map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn row_matches_filters_supports_in_json_multi_values() {
+        let row = vec!["alpha".to_string(), "banana".to_string()];
+        let filters = vec![FilterRule {
+            column: 1,
+            value: r#"@in-json:["apple","banana"]"#.to_string(),
+        }];
+        assert!(row_matches_filters(&row, &filters));
+
+        let miss = vec![FilterRule {
+            column: 1,
+            value: r#"@in-json:["apple","cherry"]"#.to_string(),
+        }];
+        assert!(!row_matches_filters(&row, &miss));
+    }
+
+    #[test]
+    fn large_csv_window_reads_cover_eof_edges() {
+        let path = temp_csv_path("window");
+        write_large_test_csv(&path, 20_000, 8).expect("create csv");
+        let state = make_test_state();
+        let path_str = path.to_string_lossy().to_string();
+
+        let first = read_csv_rows_window_internal(
+            &state,
+            path_str.clone(),
+            Some(",".to_string()),
+            0,
+            500,
+            true,
+        )
+        .expect("first window");
+        assert_eq!(first.rows.len(), 500);
+        assert!(!first.eof);
+
+        let near_end = read_csv_rows_window_internal(
+            &state,
+            path_str.clone(),
+            Some(",".to_string()),
+            19_950,
+            500,
+            true,
+        )
+        .expect("near end window");
+        assert_eq!(near_end.rows.len(), 50);
+        assert!(near_end.eof);
+        assert_eq!(near_end.rows[0][0], "id_19950");
+
+        let past_end = read_csv_rows_window_internal(
+            &state,
+            path_str,
+            Some(",".to_string()),
+            20_000,
+            500,
+            true,
+        )
+        .expect("past end window");
+        assert_eq!(past_end.rows.len(), 0);
+        assert!(past_end.eof);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn large_csv_find_match_cap_sets_has_more() {
+        let path = temp_csv_path("find_cap");
+        write_large_test_csv(&path, 30_000, 6).expect("create csv");
+
+        let result = find_matches_in_file(
+            path.to_string_lossy().to_string(),
+            ",".to_string(),
+            "needle".to_string(),
+            false,
+            false,
+            None,
+            Some(0),
+            None,
+            Some(100),
+        )
+        .expect("find matches");
+
+        assert_eq!(result.matches.len(), 100);
+        assert!(result.has_more);
+        assert!(result.scanned_rows >= 100);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn large_csv_view_find_ignores_original_index_column() {
+        let path = temp_csv_path("view_find");
+        write_view_csv(&path).expect("create view csv");
+
+        let result = scan_find_matches_from_path(
+            &path.to_string_lossy(),
+            b',',
+            false,
+            1,
+            "needle",
+            false,
+            false,
+            None,
+            0,
+            None,
+            100,
+        )
+        .expect("scan view");
+
+        assert_eq!(result.matches.len(), 1);
+        assert_eq!(result.matches[0].row, 1);
+        assert_eq!(result.matches[0].col, 0);
+        assert_eq!(result.matches[0].value, "needle_data");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn replace_file_bytes_range_supports_in_place_and_save_as() {
+        let source = temp_csv_path("text_patch_src");
+        let target = temp_csv_path("text_patch_out");
+
+        fs::write(&source, b"0123456789").expect("write source");
+        replace_file_bytes_range(
+            source.to_string_lossy().to_string(),
+            source.to_string_lossy().to_string(),
+            3,
+            4,
+            b"ABCD".to_vec(),
+        )
+        .expect("in-place replace");
+        let in_place = fs::read(&source).expect("read in-place");
+        assert_eq!(in_place, b"012ABCD789");
+
+        replace_file_bytes_range(
+            source.to_string_lossy().to_string(),
+            target.to_string_lossy().to_string(),
+            2,
+            3,
+            b"xy".to_vec(),
+        )
+        .expect("save-as replace");
+        let save_as = fs::read(&target).expect("read save-as");
+        assert_eq!(save_as, b"01xyCD789");
+
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_file(target);
+    }
+
+    #[test]
+    fn replace_text_literal_in_file_supports_utf8_streaming() {
+        let source = temp_csv_path("text_replace_utf8_src");
+        let target = temp_csv_path("text_replace_utf8_out");
+        fs::write(&source, "alpha beta alpha\n").expect("write utf8 source");
+
+        let (replaced, scanned) = replace_text_literal_in_file(
+            &source.to_string_lossy(),
+            &target.to_string_lossy(),
+            "alpha",
+            "X",
+            true,
+            false,
+            "UTF-8",
+            || false,
+            |_, _, _| {},
+        )
+        .expect("replace utf8");
+
+        assert_eq!(replaced, 2);
+        assert!(scanned > 0);
+        let output = fs::read_to_string(&target).expect("read utf8 target");
+        assert_eq!(output, "X beta X\n");
+
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_file(target);
+    }
+
+    #[test]
+    fn replace_text_literal_in_file_preserves_case_pattern() {
+        let source = temp_csv_path("text_replace_case_src");
+        let target = temp_csv_path("text_replace_case_out");
+        fs::write(&source, "alpha ALPHA Alpha aLpHa\n").expect("write source");
+
+        let (replaced, scanned) = replace_text_literal_in_file(
+            &source.to_string_lossy(),
+            &target.to_string_lossy(),
+            "alpha",
+            "beta",
+            false,
+            true,
+            "UTF-8",
+            || false,
+            |_, _, _| {},
+        )
+        .expect("replace preserve case");
+
+        assert_eq!(replaced, 4);
+        assert!(scanned > 0);
+        let output = fs::read_to_string(&target).expect("read target");
+        assert_eq!(output, "beta BETA Beta beta\n");
+
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_file(target);
+    }
+
+    #[test]
+    fn replace_text_literal_in_file_supports_utf16le_in_place() {
+        let source = temp_csv_path("text_replace_utf16_src");
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in "xx猫xx猫".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(&source, bytes).expect("write utf16 source");
+
+        let (replaced, scanned) = replace_text_literal_in_file(
+            &source.to_string_lossy(),
+            &source.to_string_lossy(),
+            "猫",
+            "犬",
+            true,
+            false,
+            "UTF-16LE",
+            || false,
+            |_, _, _| {},
+        )
+        .expect("replace utf16");
+
+        assert_eq!(replaced, 2);
+        assert!(scanned > 0);
+        let output_bytes = fs::read(&source).expect("read utf16 target");
+        assert!(output_bytes.starts_with(&[0xFF, 0xFE]));
+        let mut units = Vec::new();
+        let mut idx = 2usize;
+        while idx + 1 < output_bytes.len() {
+            units.push(u16::from_le_bytes([
+                output_bytes[idx],
+                output_bytes[idx + 1],
+            ]));
+            idx += 2;
+        }
+        let output = String::from_utf16(&units).expect("decode utf16 output");
+        assert_eq!(output, "xx犬xx犬");
+
+        let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn replace_text_regex_in_file_supports_utf8_capture_groups() {
+        let source = temp_csv_path("text_replace_regex_utf8_src");
+        let target = temp_csv_path("text_replace_regex_utf8_out");
+        fs::write(&source, "abc-12 abc-3\n").expect("write utf8 source");
+
+        let (replaced, scanned) = replace_text_regex_in_file(
+            &source.to_string_lossy(),
+            &target.to_string_lossy(),
+            r"abc-(\d+)",
+            "[$1]",
+            true,
+            "UTF-8",
+            || false,
+            |_, _, _| {},
+        )
+        .expect("replace regex utf8");
+
+        assert_eq!(replaced, 2);
+        assert!(scanned > 0);
+        let output = fs::read_to_string(&target).expect("read utf8 target");
+        assert_eq!(output, "[12] [3]\n");
+
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_file(target);
+    }
+
+    #[test]
+    fn replace_text_regex_in_file_supports_utf16le_capture_groups() {
+        let source = temp_csv_path("text_replace_regex_utf16_src");
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in "猫1 猫2".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(&source, bytes).expect("write utf16 source");
+
+        let (replaced, scanned) = replace_text_regex_in_file(
+            &source.to_string_lossy(),
+            &source.to_string_lossy(),
+            r"猫(\d)",
+            "犬$1",
+            true,
+            "UTF-16LE",
+            || false,
+            |_, _, _| {},
+        )
+        .expect("replace regex utf16");
+
+        assert_eq!(replaced, 2);
+        assert!(scanned > 0);
+        let output_bytes = fs::read(&source).expect("read utf16 target");
+        assert!(output_bytes.starts_with(&[0xFF, 0xFE]));
+        let mut units = Vec::new();
+        let mut idx = 2usize;
+        while idx + 1 < output_bytes.len() {
+            units.push(u16::from_le_bytes([
+                output_bytes[idx],
+                output_bytes[idx + 1],
+            ]));
+            idx += 2;
+        }
+        let output = String::from_utf16(&units).expect("decode utf16 output");
+        assert_eq!(output, "犬1 犬2");
+
+        let _ = fs::remove_file(source);
+    }
+
+    #[test]
+    fn recover_pending_replace_journals_restores_backup_when_target_missing() {
+        let journal_dir = temp_journal_dir("recover_backup");
+        fs::create_dir_all(&journal_dir).expect("create journal dir");
+        let target = journal_dir.join("restore_target.txt");
+        let temp = journal_dir.join("replace.tmp");
+        let backup = journal_dir.join("replace.bak");
+        fs::write(&temp, "new value").expect("write temp");
+        fs::write(&backup, "original value").expect("write backup");
+
+        let journal = ReplaceJournalRecord {
+            version: 1,
+            op: "replace_text_literal_in_file".to_string(),
+            created_at_ms: now_ms(),
+            target_path: target.to_string_lossy().to_string(),
+            temp_path: temp.to_string_lossy().to_string(),
+            backup_path: backup.to_string_lossy().to_string(),
+        };
+        let journal_path = journal_dir.join(format!(
+            "{}{}_test.json",
+            REPLACE_JOURNAL_FILE_PREFIX,
+            std::process::id()
+        ));
+        fs::write(
+            &journal_path,
+            serde_json::to_vec(&journal).expect("encode journal"),
+        )
+        .expect("write journal");
+
+        let recovered =
+            recover_pending_replace_journals_in_dir(&journal_dir).expect("recover journals");
+        assert_eq!(recovered, 1);
+        let content = fs::read_to_string(&target).expect("read restored target");
+        assert_eq!(content, "original value");
+        assert!(!journal_path.exists());
+        assert!(!temp.exists());
+        assert!(!backup.exists());
+
+        let _ = fs::remove_file(target);
+        let _ = fs::remove_dir_all(journal_dir);
+    }
+
+    #[test]
+    fn scan_text_literal_matches_supports_utf8_and_utf16le() {
+        let utf8_path = temp_csv_path("text_find_utf8");
+        fs::write(&utf8_path, "alpha beta alpha\n").expect("write utf8");
+        let utf8 = scan_text_literal_matches(
+            &utf8_path.to_string_lossy(),
+            "alpha",
+            true,
+            "UTF-8",
+            100,
+            || false,
+            |_, _, _| {},
+            |_| {},
+        )
+        .expect("scan utf8");
+        assert_eq!(utf8.matches.len(), 2);
+        assert_eq!(utf8.matches[0].row, 0);
+        assert_eq!(utf8.matches[1].row, 11);
+
+        let utf16_path = temp_csv_path("text_find_utf16");
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in "xx猫xx猫".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(&utf16_path, bytes).expect("write utf16");
+        let utf16 = scan_text_literal_matches(
+            &utf16_path.to_string_lossy(),
+            "猫",
+            true,
+            "UTF-16LE",
+            100,
+            || false,
+            |_, _, _| {},
+            |_| {},
+        )
+        .expect("scan utf16");
+        assert_eq!(utf16.matches.len(), 2);
+        assert!(utf16.matches.iter().all(|m| m.row % 2 == 0));
+        assert!(utf16.matches[0].row >= 2);
+
+        let _ = fs::remove_file(utf8_path);
+        let _ = fs::remove_file(utf16_path);
+    }
+
+    #[test]
+    fn scan_text_regex_matches_supports_utf8_and_utf16le() {
+        let utf8_path = temp_csv_path("text_find_regex_utf8");
+        fs::write(&utf8_path, "abc-123\nabc-456\n").expect("write utf8");
+        let utf8 = scan_text_regex_matches(
+            &utf8_path.to_string_lossy(),
+            r"abc-\d+",
+            true,
+            "UTF-8",
+            100,
+            || false,
+            |_, _, _| {},
+            |_| {},
+        )
+        .expect("scan regex utf8");
+        assert_eq!(utf8.matches.len(), 2);
+        assert_eq!(utf8.matches[0].row, 0);
+        let utf8_cross = scan_text_regex_matches(
+            &utf8_path.to_string_lossy(),
+            "123\\nabc",
+            true,
+            "UTF-8",
+            100,
+            || false,
+            |_, _, _| {},
+            |_| {},
+        )
+        .expect("scan regex utf8 cross-line");
+        assert_eq!(utf8_cross.matches.len(), 1);
+        assert_eq!(utf8_cross.matches[0].row, 4);
+
+        let utf16_path = temp_csv_path("text_find_regex_utf16");
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in "abc-123\nabc-789".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(&utf16_path, bytes).expect("write utf16");
+        let utf16 = scan_text_regex_matches(
+            &utf16_path.to_string_lossy(),
+            r"abc-\d+",
+            true,
+            "UTF-16LE",
+            100,
+            || false,
+            |_, _, _| {},
+            |_| {},
+        )
+        .expect("scan regex utf16");
+        assert_eq!(utf16.matches.len(), 2);
+        assert!(utf16.matches.iter().all(|m| m.row % 2 == 0));
+        assert!(utf16.matches[0].row >= 2);
+        let utf16_cross = scan_text_regex_matches(
+            &utf16_path.to_string_lossy(),
+            "123\\nabc",
+            true,
+            "UTF-16LE",
+            100,
+            || false,
+            |_, _, _| {},
+            |_| {},
+        )
+        .expect("scan regex utf16 cross-line");
+        assert_eq!(utf16_cross.matches.len(), 1);
+        assert!(utf16_cross.matches[0].row >= 10);
+
+        let _ = fs::remove_file(utf8_path);
+        let _ = fs::remove_file(utf16_path);
+    }
 }

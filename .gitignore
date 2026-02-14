@@ -24,3 +24,7 @@ dist-ssr
 *.sw?
 
 datatest/
+perf/generated/
+perf/latest.large_csv.json
+playwright-report/
+test-results/

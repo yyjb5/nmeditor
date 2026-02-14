@@ -1,5 +1,6 @@
 import type {
   Dispatch,
+  KeyboardEvent as ReactKeyboardEvent,
   RefObject,
   SetStateAction,
   MouseEvent as ReactMouseEvent,
@@ -9,6 +10,12 @@ import type { Virtualizer } from "@tanstack/react-virtual";
 
 export type CellPoint = { row: number; col: number };
 export type SelectionMode = "cell" | "row" | "col";
+export type SelectionRange = {
+  startRow: number;
+  endRow: number;
+  startCol: number;
+  endCol: number;
+};
 
 export type EditingCell = { row: number; col: number; value: string } | null;
 
@@ -29,6 +36,8 @@ export type GridViewProps = {
   onRowHeaderContextMenu: (rowIndex: number, event: ReactMouseEvent) => void;
   onColumnHeaderContextMenu: (colIndex: number, event: ReactMouseEvent) => void;
   onBodyScroll?: (event: UIEvent<HTMLDivElement>) => void;
+  onGridKeyDown?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  onGridFocusChange?: (focused: boolean) => void;
   editingHeader: { index: number; value: string } | null;
   setEditingHeader: Dispatch<SetStateAction<{ index: number; value: string } | null>>;
   commitHeaderEditing: () => void;
@@ -51,6 +60,7 @@ export type GridViewProps = {
   isColInSelection: (col: number) => boolean;
   isCellInSelection: (row: number, col: number) => boolean;
   activeCell: CellPoint | null;
+  activeRange: SelectionRange | null;
   hiddenCols: Set<number>;
   updateSelection: (
     point: CellPoint,
@@ -60,5 +70,25 @@ export type GridViewProps = {
   setIsDraggingSelection: (value: boolean) => void;
   isDraggingSelection: boolean;
   selectionMode: SelectionMode;
+  onAutoFillSelection?: (source: SelectionRange, target: CellPoint) => void;
+  freezeFirstCol?: boolean;
+  freezeFirstRow?: boolean;
+  frozenFirstRowValues?: string[] | null;
+  filteredColumns?: Set<number>;
+  headerFilterValues?: Record<number, string>;
+  onHeaderFilterApply?: (column: number, value: string) => void;
+  onHeaderFilterClear?: (column: number) => void;
+  onHeaderFilterListValues?: (
+    column: number,
+    query: string,
+    limit: number,
+    offset: number,
+  ) => Promise<{
+    values: Array<{ value: string; count: number }>;
+    hasMore: boolean;
+    truncated: boolean;
+    scannedRows: number;
+  }>;
+  filterBusy?: boolean;
   t: (en: string, zh: string) => string;
 };

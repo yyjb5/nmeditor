@@ -13,6 +13,10 @@ export type QuickbarProps = {
   autoFitEnabled: boolean;
   onToggleAutoFit: (value: boolean) => void;
   onAutoFitNow: () => void;
+  freezeFirstColEnabled: boolean;
+  onToggleFreezeFirstCol: (value: boolean) => void;
+  freezeFirstRowEnabled: boolean;
+  onToggleFreezeFirstRow: (value: boolean) => void;
   onUndo: () => void;
   onRedo: () => void;
   canUndo: boolean;

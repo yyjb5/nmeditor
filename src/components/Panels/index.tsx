@@ -1,6 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import "./styles.css";
 import type { MacroOp, PanelsProps } from "./types";
+
+const IN_FILTER_PREFIX = "@in-json:";
+const FIND_RESULTS_BATCH_SIZE = 120;
+const FIND_RESULTS_VIRTUAL_ITEM_HEIGHT = 34;
+const FIND_RESULTS_VIRTUAL_OVERSCAN = 8;
 
 export default function Panels({
   showMacroPanel,
@@ -85,6 +90,16 @@ export default function Panels({
   useRegex,
   matchCase,
   findOutputPath,
+  findMatches,
+  activeFindMatchIndex,
+  findMatchesSource,
+  findMatchesHasMore,
+  findRunning,
+  findProgress,
+  findCanceled,
+  findMatchedCount,
+  findScannedRows,
+  findElapsedMs,
   onFindTextChange,
   onReplaceTextChange,
   onFindScopeChange,
@@ -93,6 +108,12 @@ export default function Panels({
   onFindEndRowChange,
   onUseRegexChange,
   onMatchCaseChange,
+  onFindMatches,
+  onFindPrev,
+  onFindNext,
+  onFindClear,
+  onFindCancel,
+  onFindJump,
   onApplyFindReplace,
   columnStats,
   fullStats,
@@ -103,11 +124,21 @@ export default function Panels({
   sortFilterMemoryLimitText,
   onSortFilterMemoryLimitTextChange,
   onSortFilterMemoryLimitCommit,
+  forceExternalSort,
+  onForceExternalSortChange,
+  autoIndexMode,
+  onAutoIndexModeChange,
   columnSelectOptions,
   hasPreview,
   t,
 }: PanelsProps) {
   const [showAllColumnsList, setShowAllColumnsList] = useState(false);
+  const [findResultsVisibleCount, setFindResultsVisibleCount] = useState(FIND_RESULTS_BATCH_SIZE);
+  const [findResultsPanelStart, setFindResultsPanelStart] = useState(0);
+  const [findResultsScrollTop, setFindResultsScrollTop] = useState(0);
+  const [findResultsViewportHeight, setFindResultsViewportHeight] = useState(220);
+  const [findHitJumpInput, setFindHitJumpInput] = useState("1");
+  const findResultsListRef = useRef<HTMLDivElement | null>(null);
   const columnQuery = columnSearch.trim().toLowerCase();
   const filteredColumns = useMemo(() => {
     if (!columnQuery) return columnSelectOptions;
@@ -121,6 +152,200 @@ export default function Panels({
   const visibleColumns = showAllColumnsList || columnQuery
     ? filteredColumns
     : filteredColumns.slice(0, columnListLimit);
+  const columnLabelByValue = useMemo(() => {
+    const map = new Map<string, string>();
+    columnSelectOptions.forEach((option) => {
+      map.set(option.value, option.label);
+    });
+    return map;
+  }, [columnSelectOptions]);
+  const formatFilterRuleValue = (raw: string) => {
+    if (!raw.startsWith(IN_FILTER_PREFIX)) return `"${raw}"`;
+    try {
+      const parsed = JSON.parse(raw.slice(IN_FILTER_PREFIX.length));
+      if (!Array.isArray(parsed)) return `"${raw}"`;
+      const values = parsed.filter((item): item is string => typeof item === "string");
+      if (!values.length) return t("0 values", "0 个值");
+      const preview = values.slice(0, 3).join(", ");
+      const suffix = values.length > 3 ? "..." : "";
+      return t(
+        `${values.length} values (${preview}${suffix})`,
+        `${values.length} 个值（${preview}${suffix}）`,
+      );
+    } catch {
+      return `"${raw}"`;
+    }
+  };
+  const firstFindMatch = findMatches[0];
+  const visibleFindMatches = findMatches.slice(0, findResultsVisibleCount);
+  const findResultsPanelRange = useMemo(() => {
+    const total = visibleFindMatches.length;
+    if (!total) return { start: 0, end: 0 };
+    const maxStart = Math.max(total - FIND_RESULTS_BATCH_SIZE, 0);
+    const start = Math.max(0, Math.min(findResultsPanelStart, maxStart));
+    return {
+      start,
+      end: Math.min(total, start + FIND_RESULTS_BATCH_SIZE),
+    };
+  }, [findResultsPanelStart, visibleFindMatches.length]);
+  const visibleFindResultItems = useMemo(
+    () =>
+      visibleFindMatches
+        .slice(findResultsPanelRange.start, findResultsPanelRange.end)
+        .map((match, localIndex) => ({
+          index: findResultsPanelRange.start + localIndex,
+          match,
+        })),
+    [findResultsPanelRange.end, findResultsPanelRange.start, visibleFindMatches],
+  );
+  const virtualFindResultRange = useMemo(() => {
+    const total = visibleFindResultItems.length;
+    if (!total) return { start: 0, end: 0 };
+    const start = Math.max(
+      0,
+      Math.floor(findResultsScrollTop / FIND_RESULTS_VIRTUAL_ITEM_HEIGHT) - FIND_RESULTS_VIRTUAL_OVERSCAN,
+    );
+    const viewportRows = Math.ceil(findResultsViewportHeight / FIND_RESULTS_VIRTUAL_ITEM_HEIGHT);
+    const end = Math.min(
+      total,
+      start + viewportRows + FIND_RESULTS_VIRTUAL_OVERSCAN * 2,
+    );
+    return { start, end };
+  }, [findResultsScrollTop, findResultsViewportHeight, visibleFindResultItems.length]);
+  const virtualFindResultItems = useMemo(
+    () => visibleFindResultItems.slice(virtualFindResultRange.start, virtualFindResultRange.end),
+    [virtualFindResultRange.end, virtualFindResultRange.start, visibleFindResultItems],
+  );
+  const virtualFindTopSpacer = virtualFindResultRange.start * FIND_RESULTS_VIRTUAL_ITEM_HEIGHT;
+  const virtualFindBottomSpacer = Math.max(
+    0,
+    (visibleFindResultItems.length - virtualFindResultRange.end) * FIND_RESULTS_VIRTUAL_ITEM_HEIGHT,
+  );
+  const findResultsPageInfo = useMemo(() => {
+    const total = visibleFindMatches.length;
+    if (!total) return { currentPage: 0, totalPages: 0 };
+    return {
+      currentPage: Math.floor(findResultsPanelRange.start / FIND_RESULTS_BATCH_SIZE) + 1,
+      totalPages: Math.max(1, Math.ceil(total / FIND_RESULTS_BATCH_SIZE)),
+    };
+  }, [findResultsPanelRange.start, visibleFindMatches.length]);
+  const canLoadMoreFindResults = visibleFindMatches.length < findMatches.length;
+  const loadMoreFindResults = () => {
+    if (!canLoadMoreFindResults) return;
+    setFindResultsVisibleCount((prev) => Math.min(findMatches.length, prev + FIND_RESULTS_BATCH_SIZE));
+  };
+  const handleFindResultsScroll = (event: UIEvent<HTMLDivElement>) => {
+    setFindResultsScrollTop(event.currentTarget.scrollTop);
+    setFindResultsViewportHeight(event.currentTarget.clientHeight);
+    if (!canLoadMoreFindResults) return;
+    const node = event.currentTarget;
+    if (node.scrollTop + node.clientHeight >= node.scrollHeight - 24) {
+      loadMoreFindResults();
+    }
+  };
+
+  useEffect(() => {
+    setFindResultsVisibleCount(FIND_RESULTS_BATCH_SIZE);
+    setFindResultsPanelStart(0);
+    setFindResultsScrollTop(0);
+    setFindHitJumpInput("1");
+  }, [findMatchesSource, firstFindMatch?.row, firstFindMatch?.col, firstFindMatch?.value]);
+
+  useEffect(() => {
+    if (!findMatches.length) return;
+    if (activeFindMatchIndex < 0) return;
+    setFindHitJumpInput(String(activeFindMatchIndex + 1));
+    if (activeFindMatchIndex < findResultsVisibleCount) return;
+    const nextVisible =
+      Math.ceil((activeFindMatchIndex + 1) / FIND_RESULTS_BATCH_SIZE) * FIND_RESULTS_BATCH_SIZE;
+    setFindResultsVisibleCount(Math.min(findMatches.length, nextVisible));
+  }, [activeFindMatchIndex, findMatches.length, findResultsVisibleCount]);
+
+  useEffect(() => {
+    if (activeFindMatchIndex < 0) return;
+    if (activeFindMatchIndex < findResultsPanelRange.start) {
+      setFindResultsPanelStart(Math.floor(activeFindMatchIndex / FIND_RESULTS_BATCH_SIZE) * FIND_RESULTS_BATCH_SIZE);
+      return;
+    }
+    if (activeFindMatchIndex >= findResultsPanelRange.end) {
+      setFindResultsPanelStart(Math.floor(activeFindMatchIndex / FIND_RESULTS_BATCH_SIZE) * FIND_RESULTS_BATCH_SIZE);
+    }
+  }, [activeFindMatchIndex, findResultsPanelRange.end, findResultsPanelRange.start]);
+
+  useEffect(() => {
+    const node = findResultsListRef.current;
+    if (!node) return;
+    node.scrollTop = 0;
+    setFindResultsScrollTop(0);
+    setFindResultsViewportHeight(node.clientHeight || 220);
+  }, [findResultsPanelStart]);
+
+  useEffect(() => {
+    const node = findResultsListRef.current;
+    if (!node) return;
+    if (activeFindMatchIndex < findResultsPanelRange.start || activeFindMatchIndex >= findResultsPanelRange.end) {
+      return;
+    }
+    const localIndex = activeFindMatchIndex - findResultsPanelRange.start;
+    if (localIndex < 0 || localIndex >= visibleFindResultItems.length) return;
+    const targetTop = localIndex * FIND_RESULTS_VIRTUAL_ITEM_HEIGHT;
+    const targetBottom = targetTop + FIND_RESULTS_VIRTUAL_ITEM_HEIGHT;
+    if (targetTop < node.scrollTop) {
+      node.scrollTop = targetTop;
+      return;
+    }
+    if (targetBottom > node.scrollTop + node.clientHeight) {
+      node.scrollTop = targetBottom - node.clientHeight;
+    }
+  }, [
+    activeFindMatchIndex,
+    findResultsPanelRange.end,
+    findResultsPanelRange.start,
+    visibleFindResultItems.length,
+  ]);
+
+  const jumpToFindHitInput = () => {
+    if (!findMatches.length) return;
+    const parsed = Number.parseInt(findHitJumpInput.trim(), 10);
+    if (!Number.isFinite(parsed)) return;
+    const target = Math.max(0, Math.min(findMatches.length - 1, parsed - 1));
+    onFindJump(target);
+  };
+
+  const jumpToFirstFindHit = () => {
+    if (!findMatches.length) return;
+    onFindJump(0);
+  };
+
+  const jumpToLastFindHit = () => {
+    if (!findMatches.length) return;
+    onFindJump(findMatches.length - 1);
+  };
+
+  const goFindResultFirstPage = () => {
+    setFindResultsPanelStart(0);
+  };
+
+  const goFindResultPrevPage = () => {
+    setFindResultsPanelStart((prev) => Math.max(0, prev - FIND_RESULTS_BATCH_SIZE));
+  };
+
+  const goFindResultNextPage = () => {
+    if (findResultsPanelRange.end >= visibleFindMatches.length && canLoadMoreFindResults) {
+      loadMoreFindResults();
+      setFindResultsPanelStart((prev) => prev + FIND_RESULTS_BATCH_SIZE);
+      return;
+    }
+    setFindResultsPanelStart((prev) => {
+      const maxStart = Math.max(visibleFindMatches.length - FIND_RESULTS_BATCH_SIZE, 0);
+      return Math.min(maxStart, prev + FIND_RESULTS_BATCH_SIZE);
+    });
+  };
+
+  const goFindResultLastPage = () => {
+    const maxStart = Math.max(visibleFindMatches.length - FIND_RESULTS_BATCH_SIZE, 0);
+    setFindResultsPanelStart(maxStart);
+  };
 
   return (
     <>
@@ -299,10 +524,18 @@ export default function Panels({
             <div className="shortcut-list">
               <div><span>Ctrl/Cmd + Z</span><span>{t("Undo", "撤销")}</span></div>
               <div><span>Ctrl/Cmd + Y</span><span>{t("Redo", "重做")}</span></div>
-              <div><span>Enter</span><span>{t("Edit cell", "编辑单元格")}</span></div>
+              <div><span>Enter / F2</span><span>{t("Edit cell", "编辑单元格")}</span></div>
               <div><span>Esc</span><span>{t("Cancel edit", "取消编辑")}</span></div>
+              <div><span>Arrow keys</span><span>{t("Move active cell", "移动活动单元格")}</span></div>
+              <div><span>Tab / Shift+Tab</span><span>{t("Next/previous cell", "下一个/上一个单元格")}</span></div>
+              <div><span>Home / End</span><span>{t("Jump to row start/end", "跳到行首/行尾")}</span></div>
+              <div><span>Ctrl/Cmd + Home/End</span><span>{t("Jump to grid corners", "跳到表格角落")}</span></div>
+              <div><span>PageUp / PageDown</span><span>{t("Jump by viewport", "按视口翻页跳转")}</span></div>
+              <div><span>Delete / Backspace</span><span>{t("Clear selected cells", "清空所选单元格")}</span></div>
               <div><span>Ctrl/Cmd + C</span><span>{t("Copy", "复制")}</span></div>
+              <div><span>Ctrl/Cmd + X</span><span>{t("Cut", "剪切")}</span></div>
               <div><span>Ctrl/Cmd + V</span><span>{t("Paste", "粘贴")}</span></div>
+              <div><span>Ctrl/Cmd + A</span><span>{t("Select all", "全选")}</span></div>
             </div>
           </div>
           <div className="macro-row">
@@ -348,6 +581,24 @@ export default function Panels({
                 }}
               />
             </label>
+            <label className="field checkbox">
+              <span>{t("Force external sort", "强制外部排序")}</span>
+              <input
+                type="checkbox"
+                checked={forceExternalSort}
+                onChange={(e) => onForceExternalSortChange(e.target.checked)}
+              />
+            </label>
+            <label className="field">
+              <span>{t("Auto index", "自动索引")}</span>
+              <select
+                value={autoIndexMode}
+                onChange={(e) => onAutoIndexModeChange(e.target.value as "large_only" | "all")}
+              >
+                <option value="large_only">{t("Large files only", "仅大文件")}</option>
+                <option value="all">{t("All files", "全部文件")}</option>
+              </select>
+            </label>
             <label className="field">
               <span>{t("Sort column", "排序列")}</span>
               <select value={sortColumnInput} onChange={(e) => onSortColumnChange(e.target.value)}>
@@ -368,7 +619,14 @@ export default function Panels({
             </label>
             <label className="field">
               <span>{t("Filter column", "筛选列")}</span>
-              <input value={filterColumnInput} onChange={(e) => onFilterColumnChange(e.target.value)} placeholder={t("0", "0")} />
+              <select value={filterColumnInput} onChange={(e) => onFilterColumnChange(e.target.value)}>
+                <option value="">{t("Select column", "选择列")}</option>
+                {columnSelectOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
             </label>
             <label className="field">
               <span>{t("Filter text", "筛选文本")}</span>
@@ -403,7 +661,7 @@ export default function Panels({
               {filterRules.map((rule, idx) => (
                 <div key={`filter-${idx}`} className="rule-item">
                   <span>
-                    {t("Filter col", "筛选列")} {rule.column} {t("contains", "包含")} "{rule.value}"
+                    {t("Filter col", "筛选列")} {columnLabelByValue.get(rule.column) ?? rule.column} {t("contains", "包含")} {formatFilterRuleValue(rule.value)}
                   </span>
                   <button onClick={() => onRemoveFilterRule(idx)}>×</button>
                 </div>
@@ -503,6 +761,185 @@ export default function Panels({
               ? t("Full file runs will export to a new file.", "全文件运行将导出到新文件。")
               : t("Loaded rows only. Switch scope to full file for all rows.", "仅对已加载行生效。如需全文件请选择全文件。")}
           </div>
+          <div className="macro-row">
+            <button
+              onClick={onFindMatches}
+              disabled={!hasPreview || loading}
+            >
+              {t("Find matches", "查找结果")}
+            </button>
+            <button onClick={onFindCancel} disabled={!findRunning}>
+              {t("Cancel find", "取消查找")}
+            </button>
+            <button onClick={onFindPrev} disabled={!findMatches.length}>
+              {t("Prev match", "上一条")}
+            </button>
+            <button onClick={onFindNext} disabled={!findMatches.length}>
+              {t("Next match", "下一条")}
+            </button>
+            <button onClick={jumpToFirstFindHit} disabled={!findMatches.length}>
+              {t("First match", "第一条")}
+            </button>
+            <button onClick={jumpToLastFindHit} disabled={!findMatches.length}>
+              {t("Last match", "最后一条")}
+            </button>
+            <button onClick={onFindClear} disabled={!findMatches.length}>
+              {t("Clear matches", "清空结果")}
+            </button>
+            <span className="macro-hint">
+              {findRunning
+                ? t(
+                  `Finding... ${Math.round(findProgress * 100)}%${findMatchedCount !== null ? ` · matched ${findMatchedCount}` : ""}`,
+                  `查找中... ${Math.round(findProgress * 100)}%${findMatchedCount !== null ? ` · 已匹配 ${findMatchedCount}` : ""}`,
+                )
+                : findMatches.length
+                  ? t(
+                    `${activeFindMatchIndex + 1}/${findMatches.length}${findMatchesHasMore ? "+" : ""} matches (${findMatchesSource === "file" ? "full file" : findMatchesSource === "view" ? "sorted/filtered view" : "loaded"})`,
+                    `匹配 ${activeFindMatchIndex + 1}/${findMatches.length}${findMatchesHasMore ? "+" : ""}（${findMatchesSource === "file" ? "全文件" : findMatchesSource === "view" ? "排序/筛选结果" : "已加载"}）`,
+                  )
+                  : findCanceled
+                    ? t("Last find task was canceled.", "上一次查找任务已取消。")
+                    : t("No match list", "暂无结果列表")}
+            </span>
+            {findScannedRows !== null && findElapsedMs !== null ? (
+              <span className="macro-hint">
+                {t(
+                  `Scanned ${findScannedRows} rows in ${(findElapsedMs / 1000).toFixed(2)}s`,
+                  `扫描 ${findScannedRows} 行，耗时 ${(findElapsedMs / 1000).toFixed(2)} 秒`,
+                )}
+              </span>
+            ) : null}
+          </div>
+          {findMatches.length ? (
+            <div className="find-results-footer">
+              <button
+                type="button"
+                onClick={goFindResultFirstPage}
+                disabled={findResultsPanelStart <= 0}
+              >
+                {t("First page", "首页")}
+              </button>
+              <button
+                type="button"
+                onClick={goFindResultPrevPage}
+                disabled={findResultsPanelStart <= 0}
+              >
+                {t("Prev page", "上一页")}
+              </button>
+              <button
+                type="button"
+                onClick={goFindResultNextPage}
+                disabled={
+                  !findMatches.length ||
+                  (findResultsPanelRange.end >= visibleFindMatches.length && !canLoadMoreFindResults)
+                }
+              >
+                {t("Next page", "下一页")}
+              </button>
+              <button
+                type="button"
+                onClick={goFindResultLastPage}
+                disabled={findResultsPanelRange.end >= visibleFindMatches.length}
+              >
+                {t("Last page", "末页")}
+              </button>
+              <span className="macro-hint">
+                {t(
+                  `page ${findResultsPageInfo.currentPage}/${findResultsPageInfo.totalPages}`,
+                  `页 ${findResultsPageInfo.currentPage}/${findResultsPageInfo.totalPages}`,
+                )}
+              </span>
+              <label className="field find-hit-jump">
+                <span>{t("Hit #", "命中序号")}</span>
+                <input
+                  value={findHitJumpInput}
+                  onChange={(event) => setFindHitJumpInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      jumpToFindHitInput();
+                    }
+                  }}
+                  inputMode="numeric"
+                />
+              </label>
+              <button type="button" onClick={jumpToFindHitInput} disabled={!findMatches.length}>
+                {t("Go", "跳转")}
+              </button>
+            </div>
+          ) : null}
+          {findMatches.length ? (
+            <div
+              ref={findResultsListRef}
+              className="find-results-list"
+              onScroll={handleFindResultsScroll}
+            >
+              {virtualFindTopSpacer > 0 ? (
+                <div
+                  className="find-results-spacer"
+                  style={{ height: `${virtualFindTopSpacer}px` }}
+                  aria-hidden="true"
+                />
+              ) : null}
+              {virtualFindResultItems.map(({ index, match }) => (
+                <button
+                  key={`${match.row}:${match.col}:${index}`}
+                  type="button"
+                  className={`find-result-item${index === activeFindMatchIndex ? " active" : ""}`}
+                  onClick={() => onFindJump(index)}
+                >
+                  <span className="find-result-pos">
+                    {t("R", "行")}
+                    {match.row + 1}
+                    {" · "}
+                    {t("C", "列")}
+                    {match.col + 1}
+                  </span>
+                  <span className="find-result-text">{match.value}</span>
+                </button>
+              ))}
+              {virtualFindBottomSpacer > 0 ? (
+                <div
+                  className="find-results-spacer"
+                  style={{ height: `${virtualFindBottomSpacer}px` }}
+                  aria-hidden="true"
+                />
+              ) : null}
+            </div>
+          ) : null}
+          {findMatches.length ? (
+            <>
+              {canLoadMoreFindResults ? (
+                <div className="find-results-footer">
+                  <span className="macro-hint">
+                    {t(
+                      `Showing ${findResultsPanelRange.start + 1}-${findResultsPanelRange.end} / ${visibleFindMatches.length} loaded matches.`,
+                      `显示 ${findResultsPanelRange.start + 1}-${findResultsPanelRange.end} / ${visibleFindMatches.length} 条已加载结果。`,
+                    )}
+                  </span>
+                  <button type="button" onClick={loadMoreFindResults}>
+                    {t("Load more hits", "加载更多命中")}
+                  </button>
+                </div>
+              ) : visibleFindMatches.length > FIND_RESULTS_BATCH_SIZE ? (
+                <div className="macro-hint">
+                  {t(
+                    `Showing ${findResultsPanelRange.start + 1}-${findResultsPanelRange.end} / ${visibleFindMatches.length} matches.`,
+                    `显示 ${findResultsPanelRange.start + 1}-${findResultsPanelRange.end} / ${visibleFindMatches.length} 条结果。`,
+                  )}
+                </div>
+              ) : findMatchesHasMore ? (
+                <div className="macro-hint">
+                  {findMatchesHasMore
+                    ? t(
+                      "Result list reached the match cap. Narrow your query to continue.",
+                      "结果列表达到命中上限，请缩小范围后继续。",
+                    )
+                    : null}
+                </div>
+              ) : null}
+            </>
+          ) : null}
           {findOutputPath ? (
             <div className="macro-output">
               {t("Saved", "已保存")}: {findOutputPath}

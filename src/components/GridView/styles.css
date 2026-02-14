@@ -42,7 +42,8 @@
   background: var(--panel);
   color: var(--text);
   border-bottom: 1px solid var(--border);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: visible;
 }
 
 .grid-body {
@@ -51,6 +52,11 @@
   overflow: auto;
   position: relative;
   background: var(--surface);
+}
+
+.grid-body:focus {
+  outline: 2px solid #93c5fd;
+  outline-offset: -2px;
 }
 
 .grid-row {
@@ -63,6 +69,10 @@
 
 .grid-row:nth-child(even) {
   background: #f8fafc;
+}
+
+.grid-shell.fill-dragging {
+  cursor: crosshair;
 }
 
 .cell {
@@ -78,6 +88,27 @@
   display: flex;
   align-items: center;
   box-sizing: border-box;
+}
+
+.grid-row.freeze-top {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+}
+
+.cell.freeze-left {
+  position: sticky;
+  left: 0;
+  z-index: 7;
+  background: inherit;
+  box-shadow: 1px 0 0 #e2e8f0;
+}
+
+.cell.freeze-col {
+  position: sticky;
+  z-index: 6;
+  background: inherit;
+  box-shadow: 1px 0 0 #e2e8f0;
 }
 
 .cell.edited {
@@ -112,6 +143,179 @@
 .cell.header {
   font-weight: 700;
   letter-spacing: 0.02em;
+  overflow: visible;
+  z-index: 3;
+}
+
+.header-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.header-filter-trigger {
+  margin-left: 6px;
+  margin-right: 12px;
+  height: 18px;
+  min-width: 18px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.header-filter-trigger.active {
+  border-color: #0284c7;
+  color: #0369a1;
+  background: #e0f2fe;
+}
+
+.header-filter-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 10px;
+  min-width: 180px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.18);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 12;
+}
+
+.header-filter-title {
+  font-size: 11px;
+  color: #475569;
+}
+
+.header-filter-mode {
+  display: flex;
+  gap: 6px;
+}
+
+.header-filter-mode button {
+  flex: 1;
+  height: 24px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.header-filter-mode button.active {
+  border-color: #0284c7;
+  background: #e0f2fe;
+  color: #075985;
+}
+
+.header-filter-menu input {
+  height: 26px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  padding: 0 8px;
+  font-size: 12px;
+  outline: none;
+}
+
+.header-filter-menu input:focus {
+  border-color: #0ea5e9;
+  box-shadow: 0 0 0 2px rgba(14, 165, 233, 0.15);
+}
+
+.header-filter-hint {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.header-filter-values {
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  max-height: 160px;
+  overflow: auto;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.header-filter-value-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #334155;
+}
+
+.header-filter-value-item input {
+  width: 14px;
+  height: 14px;
+}
+
+.header-filter-value-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.header-filter-value-count {
+  color: #64748b;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.header-filter-empty {
+  font-size: 11px;
+  color: #94a3b8;
+  padding: 4px;
+}
+
+.header-filter-load-more {
+  height: 24px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.header-filter-load-more:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.header-filter-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.header-filter-actions button {
+  flex: 1;
+  height: 24px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.header-filter-actions button:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .cell.row-header {
@@ -135,6 +339,19 @@
   padding: 0;
   border-right: none;
   pointer-events: none;
+}
+
+.fill-handle {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  right: 8px;
+  bottom: 8px;
+  background: #0284c7;
+  border: 1px solid #ffffff;
+  border-radius: 1px;
+  z-index: 3;
+  cursor: crosshair;
 }
 
 .resize-handle {

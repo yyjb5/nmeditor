@@ -1,0 +1,50 @@
+{
+  "generatedAt": "2026-02-09T07:02:37.027Z",
+  "machine": {
+    "platform": "win32",
+    "release": "10.0.26200",
+    "cpus": 16
+  },
+  "config": {
+    "rows": 200000,
+    "cols": 12,
+    "windowSize": 2000,
+    "datasetPath": "perf\\generated\\large_200000x12.csv"
+  },
+  "metrics": {
+    "countRows": {
+      "ms": 327.85,
+      "total": 200000
+    },
+    "windows": {
+      "head": {
+        "ms": 4.92,
+        "loaded": 2000,
+        "startRow": 0,
+        "limit": 2000
+      },
+      "middle": {
+        "ms": 183.37,
+        "loaded": 2000,
+        "startRow": 100000,
+        "limit": 2000
+      },
+      "tail": {
+        "ms": 344.35,
+        "loaded": 2000,
+        "startRow": 198000,
+        "limit": 2000
+      }
+    },
+    "find": {
+      "ms": 377.06,
+      "scanned": 194001,
+      "matched": 2000,
+      "hasMore": true
+    },
+    "filterSort": {
+      "ms": 308.25,
+      "kept": 21972
+    }
+  }
+}

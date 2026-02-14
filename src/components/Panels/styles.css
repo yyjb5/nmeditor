@@ -103,6 +103,63 @@
   color: #6b7280;
 }
 
+.find-results-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.find-result-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 1px solid #d8dee8;
+  background: #ffffff;
+  border-radius: 8px;
+  padding: 6px 8px;
+  text-align: left;
+  font-size: 12px;
+}
+
+.find-result-item.active {
+  border-color: #3b82f6;
+  background: #eff6ff;
+}
+
+.find-result-pos {
+  color: #334155;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.find-result-text {
+  color: #1f2937;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.find-results-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+
+
+.find-hit-jump {
+  min-width: 120px;
+}
+
+.find-hit-jump input {
+  width: 80px;
+}
+
 .macro-title {
   font-weight: 700;
   color: #1f2a44;
@@ -136,3 +193,23 @@
   border-radius: 10px;
   padding: 8px 12px;
 }
+
+
+.find-results-list {
+  gap: 0;
+}
+
+.find-result-item {
+  padding: 4px 8px;
+  height: 34px;
+}
+
+.find-result-item + .find-result-item {
+  margin-top: 0;
+}
+
+.find-results-spacer {
+  width: 100%;
+  flex: 0 0 auto;
+}
+

@@ -1,7 +1,6 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import type { RowOp, ColumnOp } from "./useRowColumnOps";
+import { invokeCmd, saveFileDialog } from "../tauriBridge";
 
 type MacroOp = "replace" | "uppercase" | "lowercase" | "trim" | "prefix" | "suffix";
 
@@ -43,6 +42,7 @@ type UseFileOpsParams = {
   preview: { path: string; delimiter: string } | null;
   headers: string[];
   rows: string[][];
+  windowStart: number;
   patches: Record<string, string>;
   rowOps: RowOp[];
   columnOps: ColumnOp[];
@@ -60,6 +60,7 @@ export default function useFileOps({
   preview,
   headers,
   rows,
+  windowStart,
   patches,
   rowOps,
   columnOps,
@@ -120,7 +121,7 @@ export default function useFileOps({
     setError(null);
     setFullStatsLoading(true);
     try {
-      const result = await invoke<FullColumnStat[]>("compute_column_stats", {
+      const result = await invokeCmd<FullColumnStat[]>("compute_column_stats", {
         path: preview.path,
         delimiter: preview.delimiter,
         maxDistinct: 5000,
@@ -154,7 +155,8 @@ export default function useFileOps({
     const bulkEntries: Array<{ key: string; prev: string | null; next: string | null }> = [];
 
     rows.forEach((_, rowIdx) => {
-      const current = getCellValue(rowIdx, columnIndex);
+      const targetRow = windowStart + rowIdx;
+      const current = getCellValue(targetRow, columnIndex);
       let next = current;
       switch (macroOp) {
         case "replace":
@@ -180,7 +182,7 @@ export default function useFileOps({
       }
 
       if (next !== current) {
-        const entry = applyPatch(rowIdx, columnIndex, next);
+        const entry = applyPatch(targetRow, columnIndex, next);
         if (entry) {
           bulkEntries.push(entry);
           applied += 1;
@@ -216,6 +218,7 @@ export default function useFileOps({
     }
 
     let regex: RegExp | null = null;
+    let literalPattern: RegExp | null = null;
     if (useRegex) {
       try {
         regex = new RegExp(findText, matchCase ? "g" : "gi");
@@ -223,6 +226,9 @@ export default function useFileOps({
         setError(t(`Invalid regex: ${String(err)}`, `正则无效：${String(err)}`));
         return;
       }
+    } else if (!matchCase) {
+      const escaped = findText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      literalPattern = new RegExp(escaped, "gi");
     }
 
     setError(null);
@@ -231,21 +237,21 @@ export default function useFileOps({
     const bulkEntries: Array<{ key: string; prev: string | null; next: string | null }> = [];
 
     for (let rowIndex = startRow; rowIndex <= lastRow && rowIndex < rows.length; rowIndex += 1) {
+      const targetRow = windowStart + rowIndex;
       const columns = columnIndex === null ? headers.map((_, idx) => idx) : [columnIndex];
       columns.forEach((col) => {
         if (col < 0 || col >= headers.length) return;
-        const current = getCellValue(rowIndex, col);
+        const current = getCellValue(targetRow, col);
         let next = current;
         if (useRegex && regex) {
           next = current.replace(regex, replaceText);
         } else if (matchCase) {
           next = current.split(findText).join(replaceText);
-        } else {
-          const pattern = new RegExp(findText.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&"), "gi");
-          next = current.replace(pattern, replaceText);
+        } else if (literalPattern) {
+          next = current.replace(literalPattern, replaceText);
         }
         if (next !== current) {
-          const entry = applyPatch(rowIndex, col, next);
+          const entry = applyPatch(targetRow, col, next);
           if (entry) {
             bulkEntries.push(entry);
             applied += 1;
@@ -269,7 +275,7 @@ export default function useFileOps({
     }
     const columnIndex = parseOptionalIndex(findColumnInput) ?? undefined;
 
-    const target = await saveDialog({
+    const target = await saveFileDialog({
       defaultPath: preview.path.replace(/\.(csv|txt)$/i, "_findreplace.csv"),
       filters: [{ name: "CSV", extensions: ["csv"] }],
     });
@@ -278,7 +284,7 @@ export default function useFileOps({
 
     setError(null);
     setLoading(true);
-    setOpStatus(t("Running macro on file...", "正在运行宏（全文件）..."));
+    setOpStatus(t("Applying find/replace on file...", "正在应用查找/替换（全文件）..."));
     try {
       const spec: FindReplaceSpec = {
         find: findText,
@@ -287,7 +293,7 @@ export default function useFileOps({
         regex: useRegex,
         match_case: matchCase,
       };
-      const result = await invoke<FindReplaceResult>("apply_find_replace_to_file", {
+      const result = await invokeCmd<FindReplaceResult>("apply_find_replace_to_file", {
         path: preview.path,
         targetPath: target,
         delimiter: dialectDelimiter || preview.delimiter,
@@ -320,7 +326,7 @@ export default function useFileOps({
       return;
     }
 
-    const target = await saveDialog({
+    const target = await saveFileDialog({
       defaultPath: preview.path.replace(/\.(csv|txt)$/i, "_macro.csv"),
       filters: [{ name: "CSV", extensions: ["csv"] }],
     });
@@ -329,7 +335,7 @@ export default function useFileOps({
 
     setError(null);
     setLoading(true);
-    setOpStatus(t("Applying find/replace on file...", "正在应用查找/替换（全文件）..."));
+    setOpStatus(t("Running macro on file...", "正在运行宏（全文件）..."));
     try {
       const spec: CsvMacroSpec = {
         op: macroOp,
@@ -338,7 +344,7 @@ export default function useFileOps({
         replace: macroReplace || undefined,
         text: macroText || undefined,
       };
-      const result = await invoke<CsvMacroResult>("apply_macro_to_file", {
+      const result = await invokeCmd<CsvMacroResult>("apply_macro_to_file", {
         path: preview.path,
         targetPath: target,
         delimiter: dialectDelimiter || preview.delimiter,
@@ -370,7 +376,7 @@ export default function useFileOps({
         return { row, col, value };
       });
 
-      await invoke("save_csv_with_patches", {
+      await invokeCmd("save_csv_with_patches", {
         path: preview.path,
         targetPath: target,
         delimiter: dialectDelimiter || preview.delimiter,
@@ -397,7 +403,7 @@ export default function useFileOps({
 
   const saveAs = async (): Promise<{ path: string; delimiter: string } | null> => {
     if (!preview) return null;
-    const target = await saveDialog({
+    const target = await saveFileDialog({
       defaultPath: preview.path.replace(/\.(csv|txt)$/i, "_edited.csv"),
       filters: [{ name: "CSV", extensions: ["csv"] }],
     });
