@@ -69,13 +69,13 @@ export default function TextFindResultsPanel({
         <span>
           {t(
             `page ${textFindResultPanelPageInfo.currentPage}/${textFindResultPanelPageInfo.totalPages}`,
-            `ҳ ${textFindResultPanelPageInfo.currentPage}/${textFindResultPanelPageInfo.totalPages}`,
+            `页 ${textFindResultPanelPageInfo.currentPage}/${textFindResultPanelPageInfo.totalPages}`,
           )}
         </span>
         <span>
           {t(
             `loaded ${textFindResultPanelVisiblePages} page(s)`,
-            `�Ѽ��� ${textFindResultPanelVisiblePages} ҳ`,
+            `已加载 ${textFindResultPanelVisiblePages} 页`,
           )}
         </span>
         <span>
@@ -84,7 +84,7 @@ export default function TextFindResultsPanel({
             `分组 ${renderedVisibleTextFindGroups.length}/${orderedVisibleTextFindGroups.length}`,
           )}
         </span>
-        {textFindHasMore ? <em>{t("truncated", "已截�?")}</em> : null}
+        {textFindHasMore ? <em>{t("truncated", "已截断")}</em> : null}
       </div>
       <div className="text-find-results-tools">
         <button
@@ -97,13 +97,13 @@ export default function TextFindResultsPanel({
           onClick={jumpTextFindPrev}
           disabled={textLoading || textReplaceRunning || !textFindHits.length}
         >
-          {t("Prev", "上一�?")}
+          {t("Prev", "上一条")}
         </button>
         <button
           onClick={jumpTextFindNext}
           disabled={textLoading || textReplaceRunning || !textFindHits.length}
         >
-          {t("Next", "下一�?")}
+          {t("Next", "下一条")}
         </button>
         <button
           onClick={() => void jumpToTextFindHit(textFindHits.length - 1)}
@@ -131,7 +131,7 @@ export default function TextFindResultsPanel({
             textFindResultPanelRange.start <= 0
           }
         >
-          {t("Prev page", "上一�?")}
+          {t("Prev page", "上一页")}
         </button>
         <button
           onClick={() => jumpTextFindResultPage(1)}
@@ -142,7 +142,7 @@ export default function TextFindResultsPanel({
             textFindResultPanelRange.end >= textFindHits.length
           }
         >
-          {t("Next page", "下一�?")}
+          {t("Next page", "下一页")}
         </button>
         <button
           onClick={jumpTextFindResultPageLast}
@@ -153,7 +153,7 @@ export default function TextFindResultsPanel({
             textFindResultPanelRange.end >= textFindHits.length
           }
         >
-          {t("Last page", "ĩҳ")}
+          {t("Last page", "末页")}
         </button>
         <button
           onClick={loadMoreTextFindResultPages}
@@ -164,7 +164,7 @@ export default function TextFindResultsPanel({
             !textFindResultPanelCanLoadMore
           }
         >
-          {t("Load more", "���ظ���")}
+          {t("Load more", "加载更多")}
         </button>
         <button
           onClick={loadMoreTextFindRenderedGroups}
@@ -230,7 +230,7 @@ export default function TextFindResultsPanel({
           </button>
         </label>
         <label className="text-find-context-size">
-          <span>{t("Ctx", "上下�?")}</span>
+          <span>{t("Ctx", "上下文")}</span>
           <input
             value={textFindContextRadiusInput}
             onChange={(event) => setTextFindContextRadiusInput(event.target.value)}
@@ -307,7 +307,7 @@ export default function TextFindResultsPanel({
                                 snippet
                               )
                             ) : (
-                              t("Loading preview...", "加载预览�?..")
+                              t("Loading preview...", "加载预览中...")
                             )}
                           </span>
                         </span>
@@ -316,7 +316,7 @@ export default function TextFindResultsPanel({
                           <span className={`text-find-hit-badge${inCurrentChunk ? " in-chunk" : ""}`}>
                             {inCurrentChunk
                               ? t("in chunk", "当前分段")
-                              : t("out chunk", "非当前分�?")}
+                              : t("out chunk", "非当前分段")}
                           </span>
                         </span>
                       </button>

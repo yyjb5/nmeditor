@@ -33,15 +33,16 @@
 | 功能 | 转到行列、书签、书签跳转 | 大文件导航效率不足 | `src/components/TextModeWorkspace/*` | 已支持 Go line:col、Toggle/Prev/Next Bookmark 与 `F2`/`Shift+F2`/`Ctrl/Meta+F2`，书签面板（跳转/移除/清空）、按文件持久化/过滤，以及书签 JSON 导入导出 | 已完成 |
 | 功能 | 全文件“查找结果面板”与批量跳转 | 命中可见性不�?| `src/components/Panels/*`, `src/App.tsx` | 独立结果面板（偏�?上下�?双击跳转�?| 已完成（已支持命中面板首末/序号跳转+分块命中标记+上下文预览分组展示+命中高亮+上下文长度可调+分组折叠与分批加载+当前分段置顶+折叠状态持久化+结果分页懒加载+滚动到底自动加载分组命中） |
 | 功能 | 正则替换高级选项（仅选区、逐条确认、保留大小写�?| 复杂替换风险�?| `src/App.tsx`, `src-tauri/src/lib.rs` | 扩展替换参数与预览确认流�?| 已完成（选区替换 + Replace next + 保留大小写 + 逐条确认预览/确认） |
-| 功能 | 文本编码体系扩展（GBK/Shift-JIS 等） | 打开�?UTF 文件兼容性不�?| `src/hooks/useTextSession.ts`, `src-tauri/src/lib.rs` | 引入编码库并提供重新加载编码 | 待完�?|
-| 功能 | EOL/空白字符可视化与转换（CRLF/LF�?| 文本清洗体验不足 | `src/App.tsx`, `src/App.css` | 状态栏显示并支持批量转�?| 待完�?|
-| 功能 | 语法高亮/代码折叠/括号匹配 | 代码编辑能力显著落后 | 文本编辑区（当前 `textarea`�?| 接入 Monaco/CodeMirror 或自研轻量高亮层 | 待完�?|
-| 功能 | Minimap/文档地图与结构导�?| 超长文本定位�?| 文本编辑�?UI | 增加缩略导航与快速跳�?| 待完�?|
-| 功能 | 文件对比/合并（Diff/Merge�?| 与专业编辑器差距明显 | 新增对比视图模块 | 支持双栏差异高亮与块级应�?| 待完�?|
-| 功能 | 十六进制查看/编辑模式 | 二进制排障能力缺�?| 新增 Hex 视图与后端字节操�?| 支持偏移跳转、字节编辑、ASCII 对照 | 待完�?|
-| 功能 | 插件/脚本扩展机制 | 缺少 Notepad++ 生态能�?| 新增扩展 API �?| 提供命令注册、菜单挂载、沙箱权�?| 待完�?|
+| 功能 | 文本编码体系扩展（GBK/Shift-JIS 等） | 非 UTF 文本打开与保存兼容性不足 | `src/hooks/useTextSession.ts`, `src-tauri/src/lib.rs` | 引入编码库并统一前后端编码管线 | 已完成 |
+| 功能 | EOL/空白字符可视化与转换（CRLF/LF） | 文本清洗体验不足 | `src/components/TextModeWorkspace/index.tsx`, `src/components/TextModeStatusBar/index.tsx`, `src/utils/textEol.ts` | 状态栏显示 + CRLF/LF 转换 + 行尾空白清理 + 可视化预览 | 已完成 |
+| 功能 | 语法高亮/代码折叠/括号匹配 | 代码编辑能力显著落后 | `src/components/TextModeWorkspace/index.tsx`, `src/components/CodeMirrorPreview/*` | 已完成：原生/轻量双语法引擎、代码折叠、括号匹配与跳转、编辑态同步 | 已完成 |
+| 功能 | Minimap/文档地图与结构导航 | 超长文本定位弱 | `src/components/TextModeWorkspace/index.tsx`, `src/components/TextModeWorkspace/styles.css`, `src/utils/textMinimap.ts` | 增加右侧文档地图、可见区域与光标标记、结构列表过滤与快速跳转 | 已完成 |
+| 功能 | 文件对比/合并（Diff/Merge） | 与专业编辑器差距明显 | `src/components/TextModeWorkspace/index.tsx`, `src/utils/textDiff.ts`, `src/App.css` | 增加对比文件选择、差异块预览、按块合并与整份采用右侧 | 已完成 |
+| 功能 | 十六进制查看/编辑模式 | 二进制排障能力缺失 | `src/components/TextModeWorkspace/index.tsx`, `src/utils/textHex.ts`, `src/App.css` | 支持偏移跳转、字节暂存编辑、按区段写回、ASCII 对照 | 已完成 |
+| 功能 | 插件/脚本扩展机制 | 缺少 Notepad++ 生态能力 | `src/components/TextModeWorkspace/index.tsx`, `src/utils/textExtensionRuntime.ts` | 提供命令注册、脚本加载、权限沙箱执行与卸载 | 已完成 |
 | 健壮性 | 全文件替换事务与崩溃恢复 | 中断时存在数据风险 | `src-tauri/src/lib.rs` 替换任务 | 已完成：replace journal + 启动自动恢复 + 手动恢复命令 `recover_replace_journals` | 已完成 |
-| UI | 文本模式命令面板（Command Palette�?| 操作入口分散 | `src/App.tsx`, `src/components/*` | 统一命令搜索与快捷键提示 | 待完�?|
+| UI | 文本模式命令面板（Command Palette） | 操作入口分散 | `src/components/TextModeWorkspace/index.tsx`, `src/App.css` | 提供可搜索命令列表、快捷键提示与 `Ctrl/Meta+Shift+P` 快速入口 | 已完成 |
+| 功能 | Markdown 渲染预览（MD） | 仅源码编辑，预览效率不足 | `src/components/TextModeWorkspace/index.tsx`, `src/utils/markdownPreview.ts`, `src/App.css` | 已完成：实时渲染代码块/表格/任务列表与按块/行回跳源码联动 | 已完成 |
 | 功能 | CSV 网格键盘导航与编辑快捷键不完整（Tab/方向�?回车/Delete/Ctrl+C/V/X�?| �?Excel 手感差距大，重度编辑效率�?| `src/components/GridView/index.tsx`, `src/App.tsx`, `src-tauri/src/lib.rs` 菜单 | 建立统一 keymap（不依赖菜单），支持移动、进入编辑、批量删除、复制粘�?| 已完成（基础 keymap + 文件级复�?剪切 + 大文件跨窗口一致性） |
 | 功能 | CSV 筛选交互偏“面板驱动”，缺少列头下拉筛�?| 不能�?Excel 直接在表头筛�?| `src/components/GridView/*`, `src/components/Panels/*` | 增加列头筛选入口（值列�?搜索/清空/多选）并保持全文件执行 | 已完成（列头支持 contains/值列表搜�?多选，按全文件或全局视图执行�?|
 | 功能 | CSV 自动填充（fill handle�?拖拽复制 | 连续填值效率低，不�?Excel | `src/components/GridView/index.tsx`, `src/hooks/useRowColumnOps.ts` | 增加填充柄与规则（复�?序列），仅生�?patch 不全量重�?| 已完成（支持填充�?+ 复制/数字序列/日期序列；支持跨窗口与上/�?�?右扩展） |
@@ -49,14 +50,10 @@
 | 功能 | CSV 筛选列输入仍为列号（而非统一列选择器） | 易错、学习成本高 | `src/components/Panels/index.tsx` | 筛选列改为与排序一致的下拉列选择 | 已完成（改为下拉选择并在规则中显示列名） |
 | UI | CSV 编辑焦点与快捷键提示不一�?| 面板提示�?Ctrl+C/V，但网格焦点下行为不稳定 | `src/components/Panels/index.tsx`, `src/components/GridView/*` | 统一提示与真实行为，状态栏展示当前输入模式/焦点 | 已完成（状态栏新增 CSV 导航/编辑/未聚�?模式提示�?|
 
-## 待完成项优先级拆分（P0 / P1 / P2�?
-### P0（优先立即做）- 语法高亮/代码折叠/括号匹配（文本编辑区）
-### P1（第二阶段）
-- 转到�?列、书签、书签跳转（`src/App.tsx` 文本工具栏）
-- 文本编码体系扩展（GBK/Shift-JIS 等）（`src/hooks/useTextSession.ts`, `src-tauri/src/lib.rs`�?- EOL/空白字符可视化与转换（CRLF/LF）（`src/App.tsx`, `src/App.css`�?- 文件对比/合并（Diff/Merge）（新增对比视图模块�?- 十六进制查看/编辑模式（新�?Hex 视图与后端字节操作）
+## 待完成项优先级拆分（P0 / P1 / P2）
+- 暂无（上述 Markdown 待完成项已完成）
 
-### P2（中长期�?- Minimap/文档地图与结构导航（文本编辑�?UI�?- 插件/脚本扩展机制（新增扩�?API 层）
-- 文本模式命令面板（Command Palette）（`src/App.tsx`, `src/components/*`�?
+- Update: Markdown task batch completed: `T-MD-009` (single-panel style polish for heading/code/table/blockquote/task-list), `T-MD-010` (renderer upgraded to `remark-gfm + rehype-sanitize + rehype-stringify` + tests), `T-MD-011` (hybrid editing evaluation landed with one-panel realtime overlay + source mode; doc: `docs/markdown-hybrid-editing.md`).
 
 
 - Update: text full-file find now supports backend chunk consumption (consume_from/consume_limit) and frontend incremental polling.
@@ -221,9 +218,41 @@
 
 - Update: Text mode native CodeMirror preview now keeps caret context parity: active-line sync highlight and line-click jump back into textarea, as stage 7 of `T-TXT-005`.
 
+- Update: Text mode CodeMirror native preview now supports an optional editable mode (runtime toggle, live content sync, read-only while replace job runs, and truncation guard to prevent partial-edit data loss), as stage 8 of `T-TXT-005`.
 
+- Update: Text mode CodeMirror native editable preview now syncs selection/caret state back to text-editor selection model (toolbar/bookmark/jump actions keep caret parity) and supports native multi-select shortcuts `Mod+D` / `Mod+Shift+L`, as stage 9 of `T-TXT-005`.
 
+- Update: Text mode CodeMirror native editable preview now extends multi-cursor shortcut parity with `Mod+Shift+D`, `Alt+Shift+Up/Down`, `Alt+Shift+I`, and `Escape`, as stage 10 of `T-TXT-005`.
 
+- Update: Text mode CodeMirror native editable preview now mirrors native multi-selection ranges back into text-mode multi-cursor state (status strip/cursor count parity), as stage 11 of `T-TXT-005`.
 
+- Update: Text mode CodeMirror native editable preview now restores bookmark/bracket-jump shortcut parity (`F2`, `Shift+F2`, `Mod+F2`, `Mod+Shift+\`) via native keydown bridge, as stage 12 of `T-TXT-005`.
 
+- Update: Text mode native editable mode now turns the textarea into a read-only shadow layer (no pointer/focus editing) to avoid dual-editor conflicts while preserving selection sync, as stage 13 of `T-TXT-005`.
+
+- Update: Text mode CodeMirror native editable preview now enables rectangular selection (`Alt+Drag`) and crosshair cursor hint, with multi-range selection synced back to text-mode multi-cursor state, as stage 14 of `T-TXT-005`.
+
+- Update: Text mode native edit toggle now auto-focuses CodeMirror editor (selection context preserved), reducing extra click on edit-mode entry, as stage 15 of `T-TXT-005`.
+
+- Update: Text mode native-mode navigation actions (go line/col, bookmark jump, bracket jump) now re-focus CodeMirror after selection moves, keeping uninterrupted keyboard editing flow, as stage 16 of `T-TXT-005`.
+
+- Update: Text mode native editable path now promotes CodeMirror to the main editing surface (single active editor instance); syntax preview no longer duplicates editable native instance, and textarea remains as hidden compatibility fallback, as stage 17 of `T-TXT-005`.
+
+- Update: Text mode native editable path now supports block-selection expansion parity via `Alt+Shift+Arrow/Home/End/Page` (wired into existing block selection model), as stage 18 of `T-TXT-005`.
+
+- Update: Text mode native rectangular selection now syncs block-selection anchor state, enabling continued `Alt+Shift+Up/Down` block-style expansion after `Alt+Drag`, as stage 19 of `T-TXT-005`.
+
+- Update: Text encoding expansion now supports UTF-8/UTF-16LE/GBK/SHIFT-JIS end-to-end (open/decode, save/encode, and file find/replace pipeline).
+
+- Update: Text mode now supports EOL/whitespace toolkit (status EOL telemetry, CRLF/LF conversion, trailing-whitespace trim, and visible-whitespace preview).
+
+- Update: Text mode now supports a built-in diff/merge panel (select compare file, line-diff blocks, take-right-block merge, and take-all-right workflow).
+
+- Update: Text mode now includes a built-in hex view/edit panel (offset jump, byte staging edit, contiguous byte-range apply, and ASCII mirror).
+
+- Update: Text mode now supports a right-side minimap/doc-map panel (visible-window marker, caret marker, ratio jump, and structure outline quick jump/filter).
+
+- Update: Text mode now supports extension/script runtime basics (command registry, script load/unload, permission-gated sandbox context, and command run entry in toolbar).
+
+- Update: Text mode now supports a command palette (`Ctrl/Meta+Shift+P`) with searchable command list, shortcut hints, and direct execution for built-in and extension commands.
 

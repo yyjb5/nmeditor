@@ -1,10 +1,11 @@
 import type { ReactNode, RefObject } from "react";
+import type { TextEncoding } from "../../types";
 
 export type TextModeWorkspaceProps = {
   t: (en: string, zh: string) => string;
   textPath: string | null;
   textDirty: boolean;
-  textEncoding: "UTF-8" | "UTF-16LE";
+  textEncoding: TextEncoding;
   textReadOnlyPreview: boolean;
   textLoading: boolean;
   textReplaceRunning: boolean;
@@ -37,7 +38,7 @@ export type TextModeWorkspaceProps = {
   textAreaRef: RefObject<HTMLTextAreaElement | null>;
   findResultsPanel: ReactNode;
   formatByteSize: (bytes: number | null) => string;
-  setTextEncoding: (value: "UTF-8" | "UTF-16LE") => void;
+  setTextEncoding: (value: TextEncoding) => void;
   setTextChunkJumpInput: (value: string) => void;
   setTextFindQuery: (value: string) => void;
   setTextReplaceValue: (value: string) => void;

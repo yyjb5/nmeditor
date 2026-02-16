@@ -199,6 +199,7 @@ export default function useFileOpenActions({
       const selected = await openFileDialog({
         multiple: false,
         filters: [
+          { name: "All Files", extensions: ["*"] },
           { name: "CSV", extensions: ["csv", "tsv", "psv", "ssv"] },
           { name: "Text", extensions: ["txt", "log", "md"] },
         ],

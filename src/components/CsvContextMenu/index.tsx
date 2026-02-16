@@ -21,16 +21,16 @@ export default function CsvContextMenu({ t, contextMenu, onRunContextAction }: C
           </button>
           <div className="context-menu-sep" />
           <button onClick={() => onRunContextAction("duplicate")}>
-            <span>{t("Duplicate row", "复制�?")}</span>
+            <span>{t("Duplicate row", "复制行")}</span>
             <span className="context-key">D</span>
           </button>
           <button onClick={() => onRunContextAction("clear")}>
-            <span>{t("Clear rows", "清空�?")}</span>
+            <span>{t("Clear rows", "清空行")}</span>
             <span className="context-key">C</span>
           </button>
           <div className="context-menu-sep" />
           <button onClick={() => onRunContextAction("delete")}>
-            <span>{t("Delete row", "删除�?")}</span>
+            <span>{t("Delete row", "删除行")}</span>
             <span className="context-key">X</span>
           </button>
         </>
@@ -46,11 +46,11 @@ export default function CsvContextMenu({ t, contextMenu, onRunContextAction }: C
           </button>
           <div className="context-menu-sep" />
           <button onClick={() => onRunContextAction("duplicate")}>
-            <span>{t("Duplicate column", "复制�?")}</span>
+            <span>{t("Duplicate column", "复制列")}</span>
             <span className="context-key">D</span>
           </button>
           <button onClick={() => onRunContextAction("clear")}>
-            <span>{t("Clear columns", "清空�?")}</span>
+            <span>{t("Clear columns", "清空列")}</span>
             <span className="context-key">C</span>
           </button>
           <div className="context-menu-sep" />
@@ -64,7 +64,7 @@ export default function CsvContextMenu({ t, contextMenu, onRunContextAction }: C
           </button>
           <div className="context-menu-sep" />
           <button onClick={() => onRunContextAction("delete")}>
-            <span>{t("Delete column", "删除�?")}</span>
+            <span>{t("Delete column", "删除列")}</span>
             <span className="context-key">X</span>
           </button>
         </>

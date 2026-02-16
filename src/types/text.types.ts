@@ -7,7 +7,7 @@
 /**
  * Text encoding options
  */
-export type TextEncoding = "UTF-8" | "UTF-16LE";
+export type TextEncoding = "UTF-8" | "UTF-16LE" | "GBK" | "SHIFT-JIS";
 
 /**
  * Text find hit result

@@ -1,3 +1,4 @@
+use encoding_rs::{GBK, SHIFT_JIS};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{HashMap, HashSet};
@@ -1010,6 +1011,76 @@ fn apply_replacement_case_pattern(replacement: &str, source: &str) -> String {
     replacement.to_string()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextEncodingKind {
+    Utf8,
+    Utf16Le,
+    Gbk,
+    ShiftJis,
+}
+
+impl TextEncodingKind {
+    fn canonical(self) -> &'static str {
+        match self {
+            TextEncodingKind::Utf8 => "UTF-8",
+            TextEncodingKind::Utf16Le => "UTF-16LE",
+            TextEncodingKind::Gbk => "GBK",
+            TextEncodingKind::ShiftJis => "SHIFT-JIS",
+        }
+    }
+}
+
+fn parse_text_encoding_kind(value: &str) -> Result<TextEncodingKind, String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        "" | "UTF-8" | "UTF8" => Ok(TextEncodingKind::Utf8),
+        "UTF-16LE" | "UTF16LE" => Ok(TextEncodingKind::Utf16Le),
+        "GBK" | "CP936" => Ok(TextEncodingKind::Gbk),
+        "SHIFT-JIS" | "SHIFT_JIS" | "SJIS" | "CP932" | "WINDOWS-31J" => {
+            Ok(TextEncodingKind::ShiftJis)
+        }
+        _ => Err(format!(
+            "Unsupported text encoding: {}. Supported: UTF-8, UTF-16LE, GBK, SHIFT-JIS.",
+            value
+        )),
+    }
+}
+
+fn decode_bytes_with_encoding_kind(data: &[u8], encoding: TextEncodingKind) -> String {
+    match encoding {
+        TextEncodingKind::Utf8 => String::from_utf8_lossy(data).to_string(),
+        TextEncodingKind::Utf16Le => decode_utf16le_bytes(data).unwrap_or_default(),
+        TextEncodingKind::Gbk => GBK.decode(data).0.into_owned(),
+        TextEncodingKind::ShiftJis => SHIFT_JIS.decode(data).0.into_owned(),
+    }
+}
+
+fn encode_text_with_encoding_kind(text: &str, encoding: TextEncodingKind) -> Result<Vec<u8>, String> {
+    match encoding {
+        TextEncodingKind::Utf8 => Ok(text.as_bytes().to_vec()),
+        TextEncodingKind::Utf16Le => Ok(encode_utf16le_text(text)),
+        TextEncodingKind::Gbk => {
+            let (encoded, _, had_errors) = GBK.encode(text);
+            if had_errors {
+                return Err(
+                    "Text contains characters that cannot be represented in GBK.".to_string(),
+                );
+            }
+            Ok(encoded.into_owned())
+        }
+        TextEncodingKind::ShiftJis => {
+            let (encoded, _, had_errors) = SHIFT_JIS.encode(text);
+            if had_errors {
+                return Err(
+                    "Text contains characters that cannot be represented in SHIFT-JIS."
+                        .to_string(),
+                );
+            }
+            Ok(encoded.into_owned())
+        }
+    }
+}
+
 fn decode_utf16le_bytes(data: &[u8]) -> Option<String> {
     if data.len() % 2 != 0 {
         return None;
@@ -1198,9 +1269,10 @@ where
     let bom_read = file.read(&mut bom).map_err(|e| e.to_string())?;
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
 
+    let encoding_kind = parse_text_encoding_kind(encoding)?;
     let mut align_base: Option<u64> = None;
-    let needle = match encoding.to_uppercase().as_str() {
-        "UTF-16LE" => {
+    let needle = match encoding_kind {
+        TextEncodingKind::Utf16Le => {
             if !match_case {
                 return Err(
                     "Case-insensitive find for UTF-16LE is not supported in text chunk mode."
@@ -1212,11 +1284,7 @@ where
             } else {
                 0
             });
-            let mut out = Vec::with_capacity(find.len() * 2);
-            for unit in find.encode_utf16() {
-                out.extend_from_slice(&unit.to_le_bytes());
-            }
-            out
+            encode_text_with_encoding_kind(find, TextEncodingKind::Utf16Le)?
         }
         _ => {
             if !match_case && !find.is_ascii() {
@@ -1225,7 +1293,7 @@ where
                         .to_string(),
                 );
             }
-            find.as_bytes().to_vec()
+            encode_text_with_encoding_kind(find, encoding_kind)?
         }
     };
 
@@ -1598,11 +1666,10 @@ where
     let bom_read = input.read(&mut bom).map_err(|e| e.to_string())?;
     input.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
 
+    let encoding_kind = parse_text_encoding_kind(encoding)?;
     let mut align_base: Option<u64> = None;
-    let encoding_upper = encoding.to_uppercase();
-    let is_utf16 = encoding_upper == "UTF-16LE";
-    let needle = match encoding_upper.as_str() {
-        "UTF-16LE" => {
+    let needle = match encoding_kind {
+        TextEncodingKind::Utf16Le => {
             if !match_case {
                 return Err(
                     "Case-insensitive replace for UTF-16LE is not supported in text chunk mode."
@@ -1614,11 +1681,7 @@ where
             } else {
                 0
             });
-            let mut out = Vec::with_capacity(find.len() * 2);
-            for unit in find.encode_utf16() {
-                out.extend_from_slice(&unit.to_le_bytes());
-            }
-            out
+            encode_text_with_encoding_kind(find, TextEncodingKind::Utf16Le)?
         }
         _ => {
             if !match_case && !find.is_ascii() {
@@ -1627,17 +1690,14 @@ where
                         .to_string(),
                 );
             }
-            find.as_bytes().to_vec()
+            encode_text_with_encoding_kind(find, encoding_kind)?
         }
     };
     if needle.is_empty() {
         return Err("Find text is required.".to_string());
     }
 
-    let replacement_bytes = match encoding_upper.as_str() {
-        "UTF-16LE" => encode_utf16le_text(replace),
-        _ => replace.as_bytes().to_vec(),
-    };
+    let replacement_bytes = encode_text_with_encoding_kind(replace, encoding_kind)?;
 
     let temp_path = if same_path {
         let parent = target
@@ -1718,17 +1778,10 @@ where
                 }
                 if preserve_case {
                     let matched = &data[idx..idx + needle.len()];
-                    let source_text = if is_utf16 {
-                        decode_utf16le_bytes(matched).unwrap_or_default()
-                    } else {
-                        String::from_utf8_lossy(matched).to_string()
-                    };
+                    let source_text = decode_bytes_with_encoding_kind(matched, encoding_kind);
                     let replacement = apply_replacement_case_pattern(replace, &source_text);
-                    let replacement_bytes = if is_utf16 {
-                        encode_utf16le_text(&replacement)
-                    } else {
-                        replacement.into_bytes()
-                    };
+                    let replacement_bytes =
+                        encode_text_with_encoding_kind(&replacement, encoding_kind)?;
                     output
                         .write_all(&replacement_bytes)
                         .map_err(|e| e.to_string())?;
@@ -1820,8 +1873,21 @@ where
     let source = PathBuf::from(source_path);
     let target = PathBuf::from(target_path);
     let same_path = source == target;
-    let encoding_upper = encoding.to_uppercase();
-    let is_utf16 = encoding_upper == "UTF-16LE";
+    let encoding_kind = parse_text_encoding_kind(encoding)?;
+    let is_utf16 = encoding_kind == TextEncodingKind::Utf16Le;
+
+    if !is_utf16
+        && matches!(
+            encoding_kind,
+            TextEncodingKind::Gbk | TextEncodingKind::ShiftJis
+        )
+        && !pattern.is_ascii()
+    {
+        return Err(
+            "Regex find/replace for GBK or SHIFT-JIS currently supports ASCII pattern only."
+                .to_string(),
+        );
+    }
 
     if is_utf16 {
         let mut builder = regex::RegexBuilder::new(pattern);
@@ -1902,6 +1968,11 @@ where
         let mut output = File::create(&write_path).map_err(|e| e.to_string())?;
         let mut cursor = 0u64;
         let total = scan.matches.len().max(1) as f32;
+        let replacement_template = if !is_utf16 {
+            Some(encode_text_with_encoding_kind(replace, encoding_kind)?)
+        } else {
+            None
+        };
 
         if is_utf16 {
             let mut builder = regex::RegexBuilder::new(pattern);
@@ -1982,7 +2053,10 @@ where
                 input
                     .read_exact(&mut matched_bytes)
                     .map_err(|e| e.to_string())?;
-                let replaced_bytes = re.replace(&matched_bytes, replace.as_bytes()).into_owned();
+                let template = replacement_template
+                    .as_ref()
+                    .ok_or_else(|| "missing replacement template".to_string())?;
+                let replaced_bytes = re.replace(&matched_bytes, template.as_slice()).into_owned();
                 output
                     .write_all(&replaced_bytes)
                     .map_err(|e| e.to_string())?;
@@ -2394,6 +2468,33 @@ fn read_file_bytes_range(path: String, offset: u64, max_bytes: usize) -> Result<
     let bytes_read = file.read(&mut buffer).map_err(|e| e.to_string())?;
     buffer.truncate(bytes_read);
     Ok(buffer)
+}
+
+#[tauri::command]
+fn encode_text_with_encoding(
+    text: String,
+    encoding: Option<String>,
+    bom: Option<bool>,
+) -> Result<Vec<u8>, String> {
+    let encoding_raw = encoding.unwrap_or_else(|| "UTF-8".to_string());
+    let kind = parse_text_encoding_kind(&encoding_raw)?;
+    let mut bytes = encode_text_with_encoding_kind(&text, kind)?;
+    if bom.unwrap_or(false) {
+        match kind {
+            TextEncodingKind::Utf8 => {
+                let mut with_bom = vec![0xEF, 0xBB, 0xBF];
+                with_bom.extend_from_slice(&bytes);
+                bytes = with_bom;
+            }
+            TextEncodingKind::Utf16Le => {
+                let mut with_bom = vec![0xFF, 0xFE];
+                with_bom.extend_from_slice(&bytes);
+                bytes = with_bom;
+            }
+            TextEncodingKind::Gbk | TextEncodingKind::ShiftJis => {}
+        }
+    }
+    Ok(bytes)
 }
 
 #[tauri::command]
@@ -3884,6 +3985,19 @@ fn start_find_text_in_file_job(
 
     let limit = max_matches.unwrap_or(2000).clamp(1, 20000);
     let encoding = encoding.unwrap_or_else(|| "UTF-8".to_string());
+    let encoding_kind = parse_text_encoding_kind(&encoding)?;
+    if regex
+        && matches!(
+            encoding_kind,
+            TextEncodingKind::Gbk | TextEncodingKind::ShiftJis
+        )
+    {
+        return Err(
+            "Regex find for GBK or SHIFT-JIS is not supported yet. Use literal find."
+                .to_string(),
+        );
+    }
+    let encoding = encoding_kind.canonical().to_string();
     let job_id = state.next_find_job.fetch_add(1, Ordering::Relaxed);
     let cancel_flag = Arc::new(AtomicBool::new(false));
 
@@ -4040,6 +4154,19 @@ fn start_replace_text_in_file_job(
         return Err("Preserve case is not supported for regex file replace.".to_string());
     }
     let encoding = encoding.unwrap_or_else(|| "UTF-8".to_string());
+    let encoding_kind = parse_text_encoding_kind(&encoding)?;
+    if regex
+        && matches!(
+            encoding_kind,
+            TextEncodingKind::Gbk | TextEncodingKind::ShiftJis
+        )
+    {
+        return Err(
+            "Regex replace for GBK or SHIFT-JIS is not supported yet. Use literal replace."
+                .to_string(),
+        );
+    }
+    let encoding = encoding_kind.canonical().to_string();
     let target = target_path.unwrap_or_else(|| path.clone());
     let job_id = state.next_find_job.fetch_add(1, Ordering::Relaxed);
     let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -4923,6 +5050,7 @@ pub fn run() {
             read_csv_rows_window,
             read_file_head_bytes,
             read_file_bytes_range,
+            encode_text_with_encoding,
             replace_file_bytes_range,
             start_prepare_csv_index,
             get_prepare_csv_index_status,

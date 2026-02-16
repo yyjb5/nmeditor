@@ -91,6 +91,8 @@ export default function useCsvDataLoader({
     const prefetchingRef = useRef(false);
     const prefetchTimerRef = useRef<number | null>(null);
     const indexPollRef = useRef<number | null>(null);
+    const indexPollTokenRef = useRef(0);
+    const indexPollInFlightRef = useRef(false);
 
     // --- Actions ---
 
@@ -114,17 +116,20 @@ export default function useCsvDataLoader({
 
     const clearIndexPoll = useCallback(() => {
         if (indexPollRef.current !== null) {
-            window.clearInterval(indexPollRef.current);
+            window.clearTimeout(indexPollRef.current);
             indexPollRef.current = null;
         }
     }, []);
 
     const cancelIndexBuild = useCallback(async () => {
+        indexPollTokenRef.current += 1;
+        indexPollInFlightRef.current = false;
         if (indexJobId === null) return;
         try {
             await invokeCmd("cancel_prepare_csv_index", { jobId: indexJobId });
             setIndexCanceled(true);
             setIndexRunning(false);
+            setIndexJobId(null);
         } catch (err) {
             setError(String(err));
         } finally {
@@ -178,8 +183,12 @@ export default function useCsvDataLoader({
             clearIndexPoll();
             return;
         }
+        const token = ++indexPollTokenRef.current;
         clearIndexPoll();
-        indexPollRef.current = window.setInterval(async () => {
+        const poll = async () => {
+            if (token !== indexPollTokenRef.current) return;
+            if (indexPollInFlightRef.current) return;
+            indexPollInFlightRef.current = true;
             try {
                 const status = await invokeCmd<{
                     job_id: number;
@@ -188,6 +197,7 @@ export default function useCsvDataLoader({
                     canceled: boolean;
                     total_rows?: number;
                 }>("get_prepare_csv_index_status", { jobId: indexJobId });
+                if (token !== indexPollTokenRef.current) return;
                 setIndexProgress(status.progress ?? 0);
                 if (status.done) {
                     setIndexRunning(false);
@@ -197,15 +207,34 @@ export default function useCsvDataLoader({
                         setTotalRows(status.total_rows);
                     }
                     clearIndexPoll();
+                    return;
                 }
+                indexPollRef.current = window.setTimeout(() => {
+                    void poll();
+                }, 350);
             } catch (err) {
-                setError(String(err));
+                if (token !== indexPollTokenRef.current) return;
+                const message = String(err);
+                const missingJob =
+                    message.includes("job not found") ||
+                    message.includes("job_not_found");
                 setIndexRunning(false);
+                setIndexJobId(null);
                 clearIndexPoll();
+                if (!missingJob) {
+                    setError(message);
+                }
+            } finally {
+                indexPollInFlightRef.current = false;
             }
-        }, 350);
+        };
+        void poll();
 
         return () => {
+            if (token === indexPollTokenRef.current) {
+                indexPollTokenRef.current += 1;
+            }
+            indexPollInFlightRef.current = false;
             clearIndexPoll();
         };
     }, [indexJobId, indexRunning, clearIndexPoll, setError]);

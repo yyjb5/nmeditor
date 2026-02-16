@@ -6,6 +6,7 @@ import {
   writeBinaryFile,
   writeText,
 } from "../tauriBridge";
+import type { TextEncoding } from "../types";
 
 type UseTextSessionParams = {
   setError: (value: string | null) => void;
@@ -19,7 +20,7 @@ export default function useTextSession({ setError }: UseTextSessionParams) {
   const [textContent, setTextContentState] = useState("");
   const [textDirty, setTextDirty] = useState(false);
   const [textLoading, setTextLoading] = useState(false);
-  const [textEncoding, setTextEncoding] = useState<"UTF-8" | "UTF-16LE">("UTF-8");
+  const [textEncoding, setTextEncoding] = useState<TextEncoding>("UTF-8");
 
   const [textReadOnlyPreview, setTextReadOnlyPreview] = useState(false);
   const [textPreviewOffset, setTextPreviewOffset] = useState(0);
@@ -43,6 +44,44 @@ export default function useTextSession({ setError }: UseTextSessionParams) {
     }
   };
 
+  const getLegacyDecoderLabel = (encoding: TextEncoding): string => {
+    if (encoding === "GBK") return "gbk";
+    return "shift_jis";
+  };
+
+  const decodeLegacy = (bytes: Uint8Array, encoding: TextEncoding, fatal: boolean): string => {
+    try {
+      return new TextDecoder(getLegacyDecoderLabel(encoding), { fatal }).decode(bytes);
+    } catch {
+      if (fatal) throw new Error("legacy decoder fatal failed");
+      return new TextDecoder("utf-8").decode(bytes);
+    }
+  };
+
+  const decodeByEncoding = (
+    bytes: Uint8Array,
+    encoding: TextEncoding,
+    fatal = false,
+  ): string => {
+    if (encoding === "UTF-8") {
+      if (fatal) return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      return decodeUtf8(bytes);
+    }
+    if (encoding === "UTF-16LE") {
+      return new TextDecoder("utf-16le", { fatal }).decode(bytes);
+    }
+    return decodeLegacy(bytes, encoding, fatal);
+  };
+
+  const canDecodeWithoutError = (bytes: Uint8Array, encoding: TextEncoding): boolean => {
+    try {
+      void decodeByEncoding(bytes, encoding, true);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const looksLikeUtf16Le = (bytes: Uint8Array) => {
     const sampleLen = Math.min(bytes.length, 512);
     if (sampleLen < 8) return false;
@@ -56,7 +95,7 @@ export default function useTextSession({ setError }: UseTextSessionParams) {
     return oddNul >= 4 && oddNul > evenNul * 3;
   };
 
-  const decodeText = (bytes: Uint8Array): { content: string; encoding: "UTF-8" | "UTF-16LE" } => {
+  const decodeText = (bytes: Uint8Array): { content: string; encoding: TextEncoding } => {
     if (
       bytes.length >= 2 &&
       bytes[0] === 0xff &&
@@ -87,13 +126,41 @@ export default function useTextSession({ setError }: UseTextSessionParams) {
       };
     }
 
+    if (canDecodeWithoutError(bytes, "UTF-8")) {
+      return {
+        content: decodeUtf8(bytes),
+        encoding: "UTF-8",
+      };
+    }
+
+    const gbkValid = canDecodeWithoutError(bytes, "GBK");
+    const shiftJisValid = canDecodeWithoutError(bytes, "SHIFT-JIS");
+    if (gbkValid && !shiftJisValid) {
+      return {
+        content: decodeByEncoding(bytes, "GBK"),
+        encoding: "GBK",
+      };
+    }
+    if (!gbkValid && shiftJisValid) {
+      return {
+        content: decodeByEncoding(bytes, "SHIFT-JIS"),
+        encoding: "SHIFT-JIS",
+      };
+    }
+    if (gbkValid || shiftJisValid) {
+      return {
+        content: decodeByEncoding(bytes, "GBK"),
+        encoding: "GBK",
+      };
+    }
+
     return {
       content: decodeUtf8(bytes),
       encoding: "UTF-8",
     };
   };
 
-  const detectEncoding = (bytes: Uint8Array): "UTF-8" | "UTF-16LE" => {
+  const detectEncoding = (bytes: Uint8Array): TextEncoding => {
     if (
       bytes.length >= 2 &&
       bytes[0] === 0xff &&
@@ -102,12 +169,28 @@ export default function useTextSession({ setError }: UseTextSessionParams) {
       return "UTF-16LE";
     }
     if (looksLikeUtf16Le(bytes)) return "UTF-16LE";
+    if (canDecodeWithoutError(bytes, "UTF-8")) return "UTF-8";
+    const gbkValid = canDecodeWithoutError(bytes, "GBK");
+    const shiftJisValid = canDecodeWithoutError(bytes, "SHIFT-JIS");
+    if (gbkValid && !shiftJisValid) return "GBK";
+    if (!gbkValid && shiftJisValid) return "SHIFT-JIS";
+    if (gbkValid || shiftJisValid) return "GBK";
     return "UTF-8";
+  };
+
+  const isDbcsLeadByte = (byte: number, encoding: TextEncoding): boolean => {
+    if (encoding === "GBK") return byte >= 0x81 && byte <= 0xfe;
+    return (byte >= 0x81 && byte <= 0x9f) || (byte >= 0xe0 && byte <= 0xfc);
+  };
+
+  const isDbcsTrailByte = (byte: number, encoding: TextEncoding): boolean => {
+    if (encoding === "GBK") return byte >= 0x40 && byte <= 0xfe && byte !== 0x7f;
+    return (byte >= 0x40 && byte <= 0x7e) || (byte >= 0x80 && byte <= 0xfc);
   };
 
   const decodeChunkWithEncoding = (
     bytes: Uint8Array,
-    encoding: "UTF-8" | "UTF-16LE",
+    encoding: TextEncoding,
     atStart: boolean,
   ): { content: string; byteStart: number; byteLen: number } => {
     if (encoding === "UTF-16LE") {
@@ -119,6 +202,25 @@ export default function useTextSession({ setError }: UseTextSessionParams) {
         content: new TextDecoder("utf-16le").decode(bytes.subarray(dataStart, safeEnd)),
         byteStart: dataStart,
         byteLen: safeEnd - dataStart,
+      };
+    }
+
+    if (encoding === "GBK" || encoding === "SHIFT-JIS") {
+      let byteStart = 0;
+      let byteEnd = bytes.length;
+      if (!atStart && bytes.length > 0 && isDbcsTrailByte(bytes[0], encoding)) {
+        byteStart = 1;
+      }
+      if (byteEnd - byteStart > 0 && isDbcsLeadByte(bytes[byteEnd - 1], encoding)) {
+        byteEnd -= 1;
+      }
+      if (byteEnd <= byteStart) {
+        return { content: "", byteStart: 0, byteLen: 0 };
+      }
+      return {
+        content: decodeByEncoding(bytes.subarray(byteStart, byteEnd), encoding),
+        byteStart,
+        byteLen: byteEnd - byteStart,
       };
     }
 
@@ -188,7 +290,7 @@ export default function useTextSession({ setError }: UseTextSessionParams) {
     path: string,
     offset: number,
     totalBytes: number,
-    encodingHint?: "UTF-8" | "UTF-16LE",
+    encodingHint?: TextEncoding,
   ): Promise<boolean> => {
     const clampedOffset = Math.max(0, Math.min(offset, Math.max(totalBytes - 1, 0)));
     const alignedOffset =
@@ -265,15 +367,13 @@ export default function useTextSession({ setError }: UseTextSessionParams) {
         const contentBytes =
           textEncoding === "UTF-8"
             ? new TextEncoder().encode(textContent)
-            : (() => {
-                const body = new Uint8Array(textContent.length * 2);
-                for (let i = 0; i < textContent.length; i += 1) {
-                  const code = textContent.charCodeAt(i);
-                  body[i * 2] = code & 0xff;
-                  body[i * 2 + 1] = code >> 8;
-                }
-                return body;
-              })();
+            : Uint8Array.from(
+                await invokeCmd<number[]>("encode_text_with_encoding", {
+                  text: textContent,
+                  encoding: textEncoding,
+                  bom: false,
+                }),
+              );
 
         await invokeCmd<void>("replace_file_bytes_range", {
           sourcePath: textPath,
@@ -303,16 +403,13 @@ export default function useTextSession({ setError }: UseTextSessionParams) {
       if (textEncoding === "UTF-8") {
         await writeText(path, textContent);
       } else {
-        const body = new Uint8Array(textContent.length * 2);
-        for (let i = 0; i < textContent.length; i += 1) {
-          const code = textContent.charCodeAt(i);
-          body[i * 2] = code & 0xff;
-          body[i * 2 + 1] = code >> 8;
-        }
-        const bytes = new Uint8Array(body.length + 2);
-        bytes[0] = 0xff;
-        bytes[1] = 0xfe;
-        bytes.set(body, 2);
+        const bytes = Uint8Array.from(
+          await invokeCmd<number[]>("encode_text_with_encoding", {
+            text: textContent,
+            encoding: textEncoding,
+            bom: textEncoding === "UTF-16LE",
+          }),
+        );
         await writeBinaryFile(path, bytes);
       }
       setTextPath(path);

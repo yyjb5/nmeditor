@@ -1,5 +1,6 @@
 import { useCallback, useRef, type Dispatch, type SetStateAction } from "react";
 import { invokeCmd } from "../tauriBridge";
+import type { TextEncoding } from "../types";
 
 type FindMatch = { row: number; col: number; value: string };
 type TextFindHit = { offset: number; length: number };
@@ -7,7 +8,7 @@ type TextFindHit = { offset: number; length: number };
 type UseTextFileFindReplaceJobsParams = {
   textPath: string | null;
   textReadOnlyPreview: boolean;
-  textEncoding: "UTF-8" | "UTF-16LE";
+  textEncoding: TextEncoding;
   textFindQuery: string;
   textFindUseRegex: boolean;
   textFindMatchCase: boolean;

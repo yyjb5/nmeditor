@@ -5,6 +5,10 @@
   border-top: 1px solid #dbeafe;
 }
 
+.cm-preview-root.is-editable {
+  max-height: 360px;
+}
+
 .cm-preview-root .cm-editor {
   height: 100%;
 }
@@ -17,4 +21,8 @@
   background: #f8fafc;
   border-right: 1px solid #e2e8f0;
   color: #94a3b8;
+}
+
+.cm-preview-root.is-editable .cm-content {
+  cursor: text;
 }

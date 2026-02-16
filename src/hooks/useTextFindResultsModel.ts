@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { invokeCmd } from "../tauriBridge";
+import type { TextEncoding } from "../types";
 import {
   TEXT_FIND_CONTEXT_ACTIVE_NEIGHBOR,
   TEXT_FIND_CONTEXT_BATCH_SIZE,
@@ -26,7 +27,7 @@ type UseTextFindResultsModelParams = {
   textFindUseRegex: boolean;
   textFindMatchCase: boolean;
   activeTextFindIndex: number;
-  textEncoding: string;
+  textEncoding: TextEncoding;
   t: (en: string, zh: string) => string;
 };
 
@@ -440,6 +441,12 @@ export default function useTextFindResultsModel({
       if (textEncoding === "UTF-16LE") {
         return new TextDecoder("utf-16le").decode(bytes);
       }
+      if (textEncoding === "GBK") {
+        return new TextDecoder("gbk").decode(bytes);
+      }
+      if (textEncoding === "SHIFT-JIS") {
+        return new TextDecoder("shift_jis").decode(bytes);
+      }
       try {
         return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
       } catch {
@@ -449,12 +456,12 @@ export default function useTextFindResultsModel({
 
     const normalizeSnippet = (raw: string): string => {
       const compact = raw
-        .replace(/\r/g, " �?")
-        .replace(/\n/g, " �?")
-        .replace(/\t/g, " �?")
+        .replace(/\r/g, " \\r")
+        .replace(/\n/g, " \\n")
+        .replace(/\t/g, " \\t")
         .replace(/\s+/g, " ")
         .trim();
-      if (!compact) return t("(empty snippet)", "（空片段�?");
+      if (!compact) return t("(empty snippet)", "（空片段）");
       return compact.length > 220 ? `${compact.slice(0, 220)}...` : compact;
     };
 
@@ -482,7 +489,7 @@ export default function useTextFindResultsModel({
           }
           nextEntries[item.index] = normalizeSnippet(decodeSnippet(bytes));
         } catch {
-          nextEntries[item.index] = t("(preview unavailable)", "（预览不可用�?");
+          nextEntries[item.index] = t("(preview unavailable)", "（预览不可用）");
         }
       }
       if (canceled || token !== textFindContextTokenRef.current) return;

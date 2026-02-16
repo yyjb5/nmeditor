@@ -60,15 +60,15 @@ export default function CsvEditorPage({
             <span>{t(`load ${diagnosticState.loadCalls}`, `加载 ${diagnosticState.loadCalls}`)}</span>
             <span>{t(`cache-hit ${diagnosticState.cacheHits}`, `缓存命中 ${diagnosticState.cacheHits}`)}</span>
             <span>{t(`blocked-loading ${diagnosticState.blockedLoading}`, `被加载中拦截 ${diagnosticState.blockedLoading}`)}</span>
-            <span>{t(`blocked-suppress ${diagnosticState.blockedSuppress}`, `被抑制拦�?${diagnosticState.blockedSuppress}`)}</span>
+            <span>{t(`blocked-suppress ${diagnosticState.blockedSuppress}`, `被抑制拦截 ${diagnosticState.blockedSuppress}`)}</span>
             <span>{t(`blocked-eof ${diagnosticState.blockedEof}`, `被EOF拦截 ${diagnosticState.blockedEof}`)}</span>
-            <span>{t(`blocked-dup ${diagnosticState.blockedDuplicate}`, `被重复请求拦�?${diagnosticState.blockedDuplicate}`)}</span>
-            <span>{t(`last-start ${diagnosticState.lastStart ?? "-"}`, `最后起�?${diagnosticState.lastStart ?? "-"}`)}</span>
-            <span>{t(`last-rows ${diagnosticState.lastRows}`, `最后行�?${diagnosticState.lastRows}`)}</span>
+            <span>{t(`blocked-dup ${diagnosticState.blockedDuplicate}`, `被重复请求拦截 ${diagnosticState.blockedDuplicate}`)}</span>
+            <span>{t(`last-start ${diagnosticState.lastStart ?? "-"}`, `最后起点 ${diagnosticState.lastStart ?? "-"}`)}</span>
+            <span>{t(`last-rows ${diagnosticState.lastRows}`, `最后行数 ${diagnosticState.lastRows}`)}</span>
             <span>{t(`last-eof ${diagnosticState.lastEof ? "true" : "false"}`, `最后EOF ${diagnosticState.lastEof ? "true" : "false"}`)}</span>
             <span>{t(`scrollTop ${Math.round(diagnosticState.lastScrollTop)}`, `滚动Top ${Math.round(diagnosticState.lastScrollTop)}`)}</span>
-            <span>{t(`totalSize ${Math.round(diagnosticState.lastTotalSize)}`, `总高�?${Math.round(diagnosticState.lastTotalSize)}`)}</span>
-            <span>{t(`last-action ${diagnosticState.lastAction}`, `最后动�?${diagnosticState.lastAction}`)}</span>
+            <span>{t(`totalSize ${Math.round(diagnosticState.lastTotalSize)}`, `总高度 ${Math.round(diagnosticState.lastTotalSize)}`)}</span>
+            <span>{t(`last-action ${diagnosticState.lastAction}`, `最后动作 ${diagnosticState.lastAction}`)}</span>
           </div>
         </section>
       ) : null}
@@ -97,7 +97,7 @@ export default function CsvEditorPage({
           {!previewReady && !loading ? (
             <div className="empty-state">
               <div className="empty-card">
-                <h2>{t("Open a CSV or text file to begin", "打开 CSV 或文本文件开�?")}</h2>
+                <h2>{t("Open a CSV or text file to begin", "打开 CSV 或文本文件开始")}</h2>
                 <p>
                   {t(
                     "You can drag and drop a file here or use the open button.",
@@ -107,7 +107,7 @@ export default function CsvEditorPage({
                 <button onClick={onOpen}>{t("Open file", "打开文件")}</button>
                 {recentFiles.length ? (
                   <div className="recent-files">
-                    <div className="recent-title">{t("Recent files", "最近文�?")}</div>
+                    <div className="recent-title">{t("Recent files", "最近文件")}</div>
                     <div className="recent-list">
                       {recentFiles.map((path) => (
                         <button key={path} onClick={() => void onOpenPath(path)}>

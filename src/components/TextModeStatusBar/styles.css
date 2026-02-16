@@ -1,3 +1,5 @@
 .text-mode-status-bar {
   min-height: 0;
+  flex-wrap: wrap;
+  gap: 8px 12px;
 }

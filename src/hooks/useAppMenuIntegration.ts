@@ -37,7 +37,7 @@ export default function useAppMenuIntegration({
   }, [locale]);
 
   const showAboutDialog = useCallback(async () => {
-    await messageDialog(t("nmeditor �?Streamed CSV editor.", "nmeditor �?流式CSV编辑器�?"), {
+    await messageDialog(t("nmeditor - Streamed CSV editor.", "nmeditor - 流式CSV编辑器。"), {
       title: t("About", "关于"),
       kind: "info",
     });
