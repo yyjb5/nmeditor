@@ -9,6 +9,7 @@ export type StatusBarProps = {
   eof: boolean;
   rowsLength: number;
   visibleCount: number;
+  totalRows?: number | null;
   patchCount: number;
   macroAppliedCount: number;
   findAppliedCount: number;

@@ -71,6 +71,17 @@ export default function GridView({
   freezeFirstRow,
   frozenFirstRowValues,
   filteredColumns,
+  totalRows,
+  windowStart = 0,
+  loadedRowCount,
+  delimiter,
+  delimiterApplied,
+  eof,
+  indexRunning,
+  globalViewLoading,
+  sortRuleCount = 0,
+  filterRuleCount = 0,
+  patchCount,
   headerFilterValues,
   onHeaderFilterApply,
   onHeaderFilterClear,
@@ -226,6 +237,21 @@ export default function GridView({
     : null;
   const activeValue =
     activeCell ? getCellValue(activeCell.row, activeCell.col) : "";
+  const effectiveLoadedRows = loadedRowCount ?? rowVirtualizer.getVirtualItems().length;
+  const loadedStart = effectiveLoadedRows > 0 ? windowStart + 1 : 0;
+  const loadedEnd = effectiveLoadedRows > 0 ? windowStart + effectiveLoadedRows : 0;
+  const totalRowsLabel =
+    totalRows !== undefined && totalRows !== null
+      ? totalRows.toLocaleString()
+      : eof
+        ? loadedEnd.toLocaleString()
+        : t("unknown", "未知");
+  const loadedRowsLabel = effectiveLoadedRows
+    ? `${loadedStart.toLocaleString()}-${loadedEnd.toLocaleString()}`
+    : "0";
+  const delimiterLabel = delimiterApplied ?? delimiter ?? ",";
+  const activeRuleCount = sortRuleCount + filterRuleCount;
+  const effectivePatchCount = patchCount ?? Object.keys(patches).length;
 
   const openHeaderFilterMenu = useCallback(
     (col: number) => {
@@ -350,13 +376,58 @@ export default function GridView({
 
   return (
     <div className={`grid-shell${fillDrag ? " fill-dragging" : ""}`}>
-      {activeLabel ? (
-        <div className="grid-info">
-          <span className="grid-info-label">{t("Active cell", "活动单元格")}</span>
-          <span className="grid-info-pos">{activeLabel}</span>
-          <span className="grid-info-value">{activeValue}</span>
+      <div className="grid-info">
+        <div className="grid-info-group primary">
+          <span className="grid-info-label">{t("Window", "窗口")}</span>
+          <span className="grid-info-pos">
+            {loadedRowsLabel}
+            {" / "}
+            {totalRowsLabel}
+          </span>
         </div>
-      ) : null}
+        <div className="grid-info-group">
+          <span className="grid-info-label">{t("Columns", "列")}</span>
+          <span className="grid-info-pos">{columnCount.toLocaleString()}</span>
+        </div>
+        <div className="grid-info-group">
+          <span className="grid-info-label">{t("Delimiter", "分隔符")}</span>
+          <span className="grid-info-pos">{delimiterLabel}</span>
+        </div>
+        {activeRuleCount ? (
+          <div className="grid-info-group active">
+            <span className="grid-info-label">{t("View rules", "视图规则")}</span>
+            <span className="grid-info-pos">
+              {t(
+                `${sortRuleCount} sort · ${filterRuleCount} filter`,
+                `${sortRuleCount} 排序 · ${filterRuleCount} 筛选`,
+              )}
+            </span>
+          </div>
+        ) : null}
+        {effectivePatchCount ? (
+          <div className="grid-info-group dirty">
+            <span className="grid-info-label">{t("Unsaved", "未保存")}</span>
+            <span className="grid-info-pos">{effectivePatchCount.toLocaleString()}</span>
+          </div>
+        ) : null}
+        {indexRunning || globalViewLoading ? (
+          <div className="grid-info-group active">
+            <span className="grid-info-label">
+              {globalViewLoading ? t("Applying", "正在应用") : t("Index", "索引")}
+            </span>
+            <span className="grid-info-pos">
+              {globalViewLoading ? t("sort/filter", "排序/筛选") : t("running", "运行中")}
+            </span>
+          </div>
+        ) : null}
+        {activeLabel ? (
+          <div className="grid-info-group cell-context">
+            <span className="grid-info-label">{t("Cell", "单元格")}</span>
+            <span className="grid-info-pos">{activeLabel}</span>
+            <span className="grid-info-value">{activeValue}</span>
+          </div>
+        ) : null}
+      </div>
       <div
         className="grid-header"
         style={{ gridTemplateColumns, height: `${headerHeight}px` }}

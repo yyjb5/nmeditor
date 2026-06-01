@@ -57,6 +57,7 @@ export default function CsvModeStatusBar({
         eof={eof}
         rowsLength={rowsLength}
         visibleCount={rowsLength}
+        totalRows={totalRows}
         patchCount={patchCount}
         macroAppliedCount={macroAppliedCount}
         findAppliedCount={findAppliedCount}

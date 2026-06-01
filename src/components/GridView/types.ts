@@ -75,6 +75,17 @@ export type GridViewProps = {
   freezeFirstRow?: boolean;
   frozenFirstRowValues?: string[] | null;
   filteredColumns?: Set<number>;
+  totalRows?: number | null;
+  windowStart?: number;
+  loadedRowCount?: number;
+  delimiter?: string;
+  delimiterApplied?: string | null;
+  eof?: boolean;
+  indexRunning?: boolean;
+  globalViewLoading?: boolean;
+  sortRuleCount?: number;
+  filterRuleCount?: number;
+  patchCount?: number;
   headerFilterValues?: Record<number, string>;
   onHeaderFilterApply?: (column: number, value: string) => void;
   onHeaderFilterClear?: (column: number) => void;

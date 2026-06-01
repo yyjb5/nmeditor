@@ -12,6 +12,7 @@ export default function StatusBar({
   eof,
   rowsLength,
   visibleCount,
+  totalRows,
   patchCount,
   macroAppliedCount,
   findAppliedCount,
@@ -79,11 +80,25 @@ export default function StatusBar({
             ? t(`Rows: ${rowsLength} (EOF)`, `行数：${rowsLength} (结束)`)
             : t(`Rows: ${rowsLength}`, `行数：${rowsLength}`)
           : t("Waiting for file", "等待选择文件");
+  const totalRowsText =
+    totalRows !== undefined && totalRows !== null
+      ? totalRows.toLocaleString()
+      : eof
+        ? rowsLength.toLocaleString()
+        : t("unknown", "未知");
+  const editRiskText = t(
+    `Edits ${patchCount} · Macro ${macroAppliedCount} · Find ${findAppliedCount}`,
+    `编辑 ${patchCount} · 宏 ${macroAppliedCount} · 查找 ${findAppliedCount}`,
+  );
+  const visibleRowsText = t(
+    `Visible ${visibleCount} / ${totalRowsText}`,
+    `显示 ${visibleCount} / ${totalRowsText}`,
+  );
 
   return (
     <footer className="status-bar">
-      <span>{statusText}</span>
-      <span>
+      <span className="status-section status-primary">{statusText}</span>
+      <span className="status-section status-work">
         {findRunning ? (
           <>
             {t("Find task running...", "查找任务运行中...")}
@@ -108,29 +123,35 @@ export default function StatusBar({
           </>
         ) : hasPreview ? (
           <>
-            {t(
-              `Visible ${visibleCount} · Edits ${patchCount} · Macro ${macroAppliedCount} · Find ${findAppliedCount}`,
-              `显示 ${visibleCount} · 编辑 ${patchCount} · 宏 ${macroAppliedCount} · 查找 ${findAppliedCount}`,
-            )}
+            <span>{visibleRowsText}</span>
+            <span>{editRiskText}</span>
             {canBuildIndex ? (
-              <span style={{ marginLeft: 12 }}>
+              <span>
                 {t("Partial load", "部分加载")}
                 {onBuildIndex ? (
-                  <button onClick={onBuildIndex} style={{ marginLeft: 8 }}>
+                  <button onClick={onBuildIndex}>
                     {t("Build index", "构建索引")}
                   </button>
                 ) : null}
               </span>
             ) : null}
-            <span style={{ marginLeft: 12 }}>{autoIndexText}</span>
-            <span style={{ marginLeft: 12 }}>{inputModeText}</span>
+          </>
+        ) : (
+          ""
+        )}
+      </span>
+      <span className="status-section status-context">
+        {hasPreview ? (
+          <>
+            <span>{autoIndexText}</span>
+            <span>{inputModeText}</span>
             {findCanceled ? (
-              <span style={{ marginLeft: 12 }}>
+              <span>
                 {t("Find canceled", "查找已取消")}
               </span>
             ) : null}
             {findScannedRows !== null && findElapsedMs !== null ? (
-              <span style={{ marginLeft: 12 }}>
+              <span>
                 {t(
                   `Last find: scanned ${findScannedRows} rows in ${(findElapsedMs / 1000).toFixed(2)}s`,
                   `上次查找：扫描 ${findScannedRows} 行，耗时 ${(findElapsedMs / 1000).toFixed(2)} 秒`,
@@ -138,7 +159,7 @@ export default function StatusBar({
               </span>
             ) : null}
             {forceExternalSort ? (
-              <span style={{ marginLeft: 12 }}>
+              <span>
                 {t("External sort: forced", "外部排序：已强制")}
               </span>
             ) : null}

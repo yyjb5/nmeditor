@@ -35,4 +35,40 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  build: {
+    // CodeMirror is the editor core and lands around 625 kB minified; keep it
+    // as a stable cacheable chunk instead of splitting its cyclic internals.
+    chunkSizeWarningLimit: 700,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (
+            id.includes("@codemirror") ||
+            id.includes("@lezer") ||
+            id.includes("codemirror")
+          ) {
+            return "vendor-codemirror";
+          }
+          if (
+            id.includes("unified") ||
+            id.includes("remark-") ||
+            id.includes("rehype-") ||
+            id.includes("mdast-util") ||
+            id.includes("hast-util") ||
+            id.includes("micromark")
+          ) {
+            return "vendor-markdown";
+          }
+          if (id.includes("@tauri-apps")) {
+            return "vendor-tauri";
+          }
+          if (id.includes("react") || id.includes("scheduler")) {
+            return "vendor-react";
+          }
+          return undefined;
+        },
+      },
+    },
+  },
 }));

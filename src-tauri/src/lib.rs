@@ -2386,7 +2386,6 @@ fn read_csv_rows_window_internal(
                 break;
             }
             rows.push(record.iter().map(|s| s.to_string()).collect());
-            current += 1;
         }
 
         let eof = rows.len() < limit;

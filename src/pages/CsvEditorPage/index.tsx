@@ -36,6 +36,14 @@ export default function CsvEditorPage({
   onOpenPath,
   gridViewProps,
 }: CsvEditorPageProps) {
+  const panelState = panelsProps as {
+    showFindPanel?: boolean;
+    showOpsPanel?: boolean;
+    showMacroPanel?: boolean;
+    showStatsPanel?: boolean;
+    showExportPanel?: boolean;
+  };
+
   return (
     <section className="surface csv-editor-page">
       <TabBar {...(tabBarProps as ComponentProps<typeof TabBar>)} />
@@ -82,6 +90,13 @@ export default function CsvEditorPage({
             <div className="panel-header">
               <span>{t("Panels", "面板")}</span>
               <button onClick={onCollapseDrawer}>{t("Collapse", "收起")}</button>
+            </div>
+            <div className="panel-mode-strip" aria-label={t("Active panel groups", "当前面板组")}>
+              <span className={panelState.showFindPanel ? "active" : ""}>{t("Find", "查找")}</span>
+              <span className={panelState.showOpsPanel ? "active" : ""}>{t("Columns", "列")}</span>
+              <span className={panelState.showMacroPanel ? "active" : ""}>{t("Batch", "批量")}</span>
+              <span className={panelState.showStatsPanel ? "active" : ""}>{t("Stats", "统计")}</span>
+              <span className={panelState.showExportPanel ? "active" : ""}>{t("Export", "导出")}</span>
             </div>
             <div className="panel-resizer" onMouseDown={onStartSidebarResize} />
             <Panels {...(panelsProps as ComponentProps<typeof Panels>)} />

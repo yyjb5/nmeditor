@@ -2,13 +2,23 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.text-mode-workspace > .text-toolbar {
+  order: 1;
+  flex: 0 0 auto;
 }
 
 .text-area-shell {
   position: relative;
   display: flex;
-  flex: 1;
-  min-height: 0;
+  order: 2;
+  flex: 1 1 auto;
+  min-height: 220px;
+  padding: 0 10px 10px;
+  background: #ffffff;
 }
 
 .text-area-shell.with-docmap {
@@ -19,6 +29,12 @@
   position: relative;
   flex: 1;
   min-width: 0;
+  min-height: 0;
+  border-radius: 0;
+  resize: none;
+  font-size: 13px;
+  line-height: 1.55;
+  tab-size: 2;
   z-index: 2;
 }
 
@@ -64,14 +80,49 @@
 .text-area-shell .text-main-native-cm {
   flex: 1;
   min-height: 0;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
+  border: 1px solid var(--border);
+  border-radius: 0;
   overflow: hidden;
 }
 
 .text-area-shell .text-main-native-cm.cm-preview-root {
   min-height: 0;
   max-height: none;
+}
+
+.text-mode-workspace > .text-diff-notice,
+.text-mode-workspace > .text-extension-panel,
+.text-mode-workspace > .text-multi-cursor-status,
+.text-mode-workspace > .text-bookmark-panel,
+.text-mode-workspace > .text-readonly-banner,
+.text-mode-workspace > .text-find-results-panel,
+.text-mode-workspace > .text-diff-panel,
+.text-mode-workspace > .text-hex-panel,
+.text-mode-workspace > .text-syntax-preview,
+.text-mode-workspace > .text-whitespace-preview,
+.text-mode-workspace > .text-markdown-preview {
+  order: 3;
+  flex: 0 0 auto;
+  margin: 0 10px 8px;
+}
+
+.text-mode-workspace > .text-readonly-banner,
+.text-mode-workspace > .text-multi-cursor-status,
+.text-mode-workspace > .text-diff-notice {
+  order: 2;
+  margin: 0 10px 8px;
+}
+
+.text-mode-workspace > .text-find-results-panel,
+.text-mode-workspace > .text-bookmark-panel,
+.text-mode-workspace > .text-diff-panel,
+.text-mode-workspace > .text-hex-panel,
+.text-mode-workspace > .text-syntax-preview,
+.text-mode-workspace > .text-whitespace-preview,
+.text-mode-workspace > .text-markdown-preview,
+.text-mode-workspace > .text-extension-panel {
+  max-height: 30vh;
+  overflow: auto;
 }
 
 .text-syntax-inline {
@@ -335,9 +386,9 @@
 .text-docmap-panel {
   width: 220px;
   flex: 0 0 220px;
-  border: 1px solid #dbeafe;
-  border-radius: 8px;
-  background: #f8fbff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: #ffffff;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -351,8 +402,8 @@
   gap: 6px;
   width: 100%;
   padding: 6px 8px;
-  border-bottom: 1px solid #dbeafe;
-  background: #eff6ff;
+  border-bottom: 1px solid var(--border-soft);
+  background: #fbfcfd;
   color: #334155;
   font-size: 11px;
 }
@@ -365,8 +416,8 @@
   position: relative;
   margin: 8px;
   height: 180px;
-  border: 1px solid #bfdbfe;
-  border-radius: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   background: #ffffff;
   overflow: hidden;
   cursor: pointer;
@@ -377,7 +428,7 @@
   left: 0;
   right: 0;
   border: none;
-  background: #2563eb;
+  background: var(--accent);
   padding: 0;
   margin: 0;
 }
@@ -404,7 +455,7 @@
   display: grid;
   gap: 6px;
   padding: 0 8px 8px;
-  border-bottom: 1px solid #dbeafe;
+  border-bottom: 1px solid var(--border-soft);
 }
 
 .text-docmap-structure-head strong {
@@ -433,8 +484,8 @@
   grid-template-columns: auto auto minmax(0, 1fr);
   gap: 6px;
   align-items: center;
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
   background: #ffffff;
   padding: 3px 6px;
   text-align: left;
@@ -442,8 +493,8 @@
 }
 
 .text-docmap-item.active {
-  border-color: #93c5fd;
-  background: #eff6ff;
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .text-docmap-item .line {
@@ -481,13 +532,13 @@
   position: absolute;
   width: 2px;
   border-radius: 2px;
-  background: #3b82f6;
+  background: var(--accent);
   opacity: 0.72;
   box-shadow: 0 0 0 1px rgba(191, 219, 254, 0.45);
 }
 
 .text-multi-cursor-marker.active {
-  background: #1d4ed8;
+  background: var(--accent);
   opacity: 0.95;
 }
 
@@ -511,8 +562,8 @@
 .text-multi-cursor-block {
   position: absolute;
   border-radius: 2px;
-  background: rgba(59, 130, 246, 0.22);
-  outline: 1px solid rgba(59, 130, 246, 0.45);
+  background: rgba(31, 111, 235, 0.18);
+  outline: 1px solid rgba(31, 111, 235, 0.38);
 }
 
 .text-bookmark-tools {
@@ -556,9 +607,9 @@
 
 .text-bookmark-panel {
   margin-top: 8px;
-  border: 1px solid #dbeafe;
-  background: #f8fbff;
-  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #ffffff;
+  border-radius: var(--radius-md);
   padding: 6px 8px;
   display: grid;
   gap: 6px;
@@ -611,15 +662,15 @@
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 6px;
   align-items: center;
-  border: 1px solid #dbeafe;
-  border-radius: 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
   background: #ffffff;
   padding: 2px;
 }
 
 .text-bookmark-item.active {
-  border-color: #93c5fd;
-  background: #eff6ff;
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .text-bookmark-jump {
@@ -688,9 +739,9 @@
 
 .text-syntax-preview {
   margin: 8px 0;
-  border: 1px solid #dbeafe;
-  border-radius: 10px;
-  background: #f8fbff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: #ffffff;
   overflow: hidden;
 }
 
@@ -700,8 +751,8 @@
   gap: 8px;
   width: 100%;
   padding: 6px 8px;
-  border-bottom: 1px solid #dbeafe;
-  background: #eff6ff;
+  border-bottom: 1px solid var(--border-soft);
+  background: #fbfcfd;
   font-size: 12px;
   color: #334155;
 }
@@ -747,7 +798,7 @@
 }
 
 .text-syntax-line.active {
-  background: #eff6ff;
+  background: var(--accent-soft);
 }
 
 .text-syntax-fold-toggle {

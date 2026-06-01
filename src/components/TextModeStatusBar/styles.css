@@ -1,5 +1,12 @@
 .text-mode-status-bar {
-  min-height: 0;
-  flex-wrap: wrap;
-  gap: 8px 12px;
+  min-height: 26px;
+  flex-wrap: nowrap;
+  gap: 16px;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.text-mode-status-bar span {
+  min-width: max-content;
 }

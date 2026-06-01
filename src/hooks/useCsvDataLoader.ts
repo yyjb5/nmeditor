@@ -93,6 +93,7 @@ export default function useCsvDataLoader({
     const indexPollRef = useRef<number | null>(null);
     const indexPollTokenRef = useRef(0);
     const indexPollInFlightRef = useRef(false);
+    const activeIndexRequestKeyRef = useRef<string | null>(null);
 
     // --- Actions ---
 
@@ -124,12 +125,16 @@ export default function useCsvDataLoader({
     const cancelIndexBuild = useCallback(async () => {
         indexPollTokenRef.current += 1;
         indexPollInFlightRef.current = false;
-        if (indexJobId === null) return;
+        if (indexJobId === null) {
+            activeIndexRequestKeyRef.current = null;
+            return;
+        }
         try {
             await invokeCmd("cancel_prepare_csv_index", { jobId: indexJobId });
             setIndexCanceled(true);
             setIndexRunning(false);
             setIndexJobId(null);
+            activeIndexRequestKeyRef.current = null;
         } catch (err) {
             setError(String(err));
         } finally {
@@ -143,7 +148,13 @@ export default function useCsvDataLoader({
             delimiterValue?: string,
             trigger: "auto" | "manual" = "manual",
         ) => {
+            const resolvedDelimiter = delimiterValue ?? delimiter;
+            const requestKey = `${path}::${resolvedDelimiter}`;
+            if (trigger === "auto" && activeIndexRequestKeyRef.current === requestKey) {
+                return;
+            }
             await cancelIndexBuild();
+            activeIndexRequestKeyRef.current = requestKey;
             setIndexProgress(0);
             setIndexCanceled(false);
             if (setLastIndexTrigger) setLastIndexTrigger(trigger);
@@ -155,12 +166,13 @@ export default function useCsvDataLoader({
                     total_rows?: number;
                 }>("start_prepare_csv_index", {
                     path,
-                    delimiter: delimiterValue ?? delimiter,
+                    delimiter: resolvedDelimiter,
                 });
                 if (response.done) {
                     setIndexRunning(false);
                     setIndexJobId(null);
                     setIndexProgress(1);
+                    activeIndexRequestKeyRef.current = null;
                     if (response.total_rows !== undefined) {
                         setTotalRows(response.total_rows);
                     }
@@ -172,6 +184,7 @@ export default function useCsvDataLoader({
                 setError(String(err));
                 setTotalRows(null);
                 setIndexRunning(false);
+                activeIndexRequestKeyRef.current = null;
             }
         },
         [delimiter, cancelIndexBuild, setError, setLastIndexTrigger],
@@ -203,6 +216,7 @@ export default function useCsvDataLoader({
                     setIndexRunning(false);
                     setIndexCanceled(status.canceled);
                     setIndexJobId(null);
+                    activeIndexRequestKeyRef.current = null;
                     if (status.total_rows !== undefined) {
                         setTotalRows(status.total_rows);
                     }
@@ -220,6 +234,7 @@ export default function useCsvDataLoader({
                     message.includes("job_not_found");
                 setIndexRunning(false);
                 setIndexJobId(null);
+                activeIndexRequestKeyRef.current = null;
                 clearIndexPoll();
                 if (!missingJob) {
                     setError(message);
