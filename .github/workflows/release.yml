@@ -15,7 +15,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [macos-latest, ubuntu-latest, windows-latest]
+        include:
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin --bundles app,dmg
+          - platform: ubuntu-latest
+            args: --bundles deb,appimage
+          - platform: windows-latest
+            args: --bundles nsis
     runs-on: ${{ matrix.platform }}
 
     steps:
@@ -52,3 +58,4 @@ jobs:
           releaseBody: "See the assets to download this version and install."
           releaseDraft: false
           prerelease: false
+          args: ${{ matrix.args }}
